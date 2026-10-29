@@ -1,0 +1,50 @@
+{
+  "name": "@bunker/control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/security.test.ts tests/client.test.tsx tests/identity-config.test.ts tests/notifications.test.ts tests/notification-shutdown.test.ts",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "bootstrap": "tsx scripts/bootstrap.ts",
+    "generate:api": "tsx scripts/openapi.ts && openapi-typescript ../shared/openapi.yaml -o src/lib/api.generated.ts",
+    "test:integration": "sh scripts/test-integration.sh",
+    "gateway": "tsx scripts/gateway.ts",
+    "identity:link": "tsx scripts/link-identity.ts",
+    "test:production": "pnpm build && BUNKER_TEST_REAL_NEXT=true sh scripts/test-integration.sh",
+    "notifications": "tsx scripts/notifications.ts",
+    "password:recover": "tsx scripts/recover-password.ts"
+  },
+  "dependencies": {
+    "@peculiar/x509": "3.1.0",
+    "@radix-ui/react-slot": "^1.2.4",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "jose": "6.2.14",
+    "next": "^16.1.6",
+    "oauth4webapi": "3.8.8",
+    "openapi-fetch": "^0.17.0",
+    "pg": "^8.18.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "reflect-metadata": "0.2.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/pg": "^8.16.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "eslint": "^9.39.0",
+    "eslint-config-next": "^16.1.6",
+    "openapi-typescript": "^7.13.0",
+    "prettier": "^3.9.10",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "type": "module"
+}

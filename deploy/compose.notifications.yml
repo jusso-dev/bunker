@@ -1,0 +1,53 @@
+# Explicit opt-in overlay; never used by the default compose.yml deployment.
+# The external network MUST already enforce reviewed DNS/HTTPS destination egress
+# and deny inbound connections to workers. Compose cannot install that firewall.
+services:
+  database:
+    networks: [default, notification-data]
+  control-plane:
+    environment:
+      BUNKER_NOTIFICATIONS_ENABLED: 'true'
+    volumes:
+      - type: bind
+        source: ${BUNKER_NOTIFICATION_CONFIG_DIR:?set protected config-only directory}
+        target: /run/secrets/notification-config
+        read_only: true
+        bind: {create_host_path: false}
+  notifications:
+    image: bunker-control-plane:local
+    command: [node, --import, ./control-plane/node_modules/tsx/dist/loader.mjs, control-plane/scripts/notification-entrypoint.ts]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL_FILE: /run/secrets/database-url
+      BUNKER_NOTIFICATIONS_ENABLED: 'true'
+    secrets: [database-url]
+    volumes:
+      - type: bind
+        source: ${BUNKER_NOTIFICATION_CONFIG_DIR:?set protected config-only directory}
+        target: /run/secrets/notification-config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BUNKER_NOTIFICATION_SIGNING_DIR:?set separate protected signing-only directory}
+        target: /run/secrets/notification-signing
+        read_only: true
+        bind: {create_host_path: false}
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/bunker:uid=1000,gid=1000,mode=0700
+    networks: [notification-data, notification-egress]
+    dns: ['${BUNKER_NOTIFICATION_DNS:?set approved DNS resolver IP}']
+    depends_on:
+      database:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: unless-stopped
+    stop_grace_period: 60s
+networks:
+  notification-data:
+    internal: true
+  notification-egress:
+    external: true
+    name: ${BUNKER_NOTIFICATION_NETWORK:?set pre-provisioned firewall-controlled egress network}

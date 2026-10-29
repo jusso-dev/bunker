@@ -1,0 +1,42 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+use reqsign_azure_storage::WorkloadIdentityCredentialProvider;
+
+use super::{assert_provider_reads_probe, live_context};
+
+fn is_test_enabled() -> bool {
+    std::env::var("REQSIGN_AZURE_STORAGE_TEST_WORKLOAD_IDENTITY").unwrap_or_default() == "on"
+}
+
+#[tokio::test]
+async fn test_workload_identity_provider() -> anyhow::Result<()> {
+    if !is_test_enabled() {
+        eprintln!("Skipping test: REQSIGN_AZURE_STORAGE_TEST_WORKLOAD_IDENTITY is not enabled");
+        return Ok(());
+    }
+
+    for name in [
+        "AZURE_TENANT_ID",
+        "AZURE_CLIENT_ID",
+        "AZURE_FEDERATED_TOKEN_FILE",
+    ] {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
+    }
+
+    assert_provider_reads_probe(WorkloadIdentityCredentialProvider::new(), live_context()).await
+}

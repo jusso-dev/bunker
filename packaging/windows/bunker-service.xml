@@ -1,0 +1,11 @@
+<!-- WinSW wrapper template; bunker itself is not a Windows SCM service. -->
+<service>
+  <id>Bunker</id>
+  <name>Bunker backup daemon</name>
+  <description>Local encrypted workspace snapshots</description>
+  <executable>powershell.exe</executable>
+  <arguments>-NoProfile -NonInteractive -File "%BASE%\run-daemon.ps1"</arguments>
+  <startmode>Manual</startmode>
+  <onfailure action="restart" delay="15 sec" />
+  <log mode="roll" />
+</service>

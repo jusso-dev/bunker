@@ -1,0 +1,44 @@
+{
+  "home": {
+    ".claude/settings.json": "{\"theme\":\"dark\"}",
+    ".claude/CLAUDE.md": "Prefer focused changes.\n",
+    ".claude/skills/review/SKILL.md": "Review the patch.\n",
+    ".claude/agents/reviewer.md": "Review code.\n",
+    ".claude/hooks/end.sh": "echo done\n",
+    ".claude/memory/MEMORY.md": "Use stable APIs.\n",
+    ".claude.json": "{\"mcpServers\":{\"fixture\":{\"env\":{\"API_KEY\":\"fake-claude-credential\"}}},\"projects\":{\"fixture\":{\"history\":[\"customer-fixture-data\"]}}}",
+    ".cursor/mcp.json": "{\"mcpServers\":{\"fixture\":{\"headers\":{\"Authorization\":\"fake-cursor-credential\"}}}}",
+    ".cursor/settings.json": "{\"theme\":\"light\"}",
+    ".cursor/rules/style.mdc": "Use clear names.\n",
+    ".codex/config.toml": "model = \"fixture-model\"\n[mcp_servers.fixture.env]\nAPI_KEY = \"fake-codex-credential\"\n",
+    ".codex/AGENTS.md": "Keep code simple.\n",
+    ".codex/prompts/review.md": "Review changes.\n",
+    ".codex/skills/check/SKILL.md": "Run checks.\n",
+    ".copilot/config.json": "{\"theme\":\"auto\"}",
+    ".copilot/mcp-config.json": "{\"mcpServers\":{\"fixture\":{\"apiKey\":\"fake-copilot-credential\"}}}",
+    ".kiro/settings/mcp.json": "{\"mcpServers\":{\"fixture\":{\"env\":{\"TOKEN\":\"fake-kiro-credential\"}}}}",
+    ".kiro/steering/principles.md": "Use small functions.\n",
+    ".kiro/hooks/check.kiro": "{\"name\":\"fixture-hook\",\"when\":{\"type\":\"fileEdited\"}}",
+    ".kiro/specs/feature/requirements.md": "Fixture specification.\n"
+  },
+  "workspace": {
+    "AGENTS.md": "Use workspace conventions.\n",
+    "CLAUDE.md": "Use repository conventions.\n",
+    ".mcp.json": "{\"mcpServers\":{\"fixture\":{\"env\":{\"TOKEN\":\"${env:FIXTURE_TOKEN}\"}}}}",
+    ".cursor/rules/project.mdc": "Write focused tests.\n",
+    ".cursorrules": "Follow repository rules.\n",
+    ".github/copilot-instructions.md": "Review before committing.\n",
+    ".github/instructions/rust.instructions.md": "Format Rust code.\n",
+    ".github/prompts/review.prompt.md": "Review the diff.\n",
+    ".github/chatmodes/reviewer.chatmode.md": "Act as a reviewer.\n",
+    ".github/agents/reviewer.agent.md": "Inspect tests.\n",
+    ".vscode/mcp.json": "{\"servers\":{\"fixture\":{\"env\":{\"TOKEN\":\"vault://fixture/token\"}}}}",
+    ".kiro/steering/project.md": "Use explicit types.\n",
+    ".kiro/specs/feature/design.md": "Fixture design.\n"
+  },
+  "editor": {
+    "Cursor/User/settings.json": "{\"editor.fontSize\":14}",
+    "Code/User/mcp.json": "{\"servers\":{\"fixture\":{\"headers\":{\"X-Api-Key\":\"fake-editor-credential\"}}}}",
+    "Kiro/User/settings.json": "{\"editor.fontSize\":14}"
+  }
+}

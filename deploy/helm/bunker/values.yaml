@@ -1,0 +1,43 @@
+replicaCount: 1
+image:
+  repository: bunker-control-plane
+  tag: local
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+origin: https://bunker.example.invalid
+hostOrigin: https://hosts.bunker.example.invalid
+# Mounted into a private runtime directory; see docs/user/deployment.md for keys.
+identitySecret: bunker-identity
+# Must already exist in the release namespace, with a database-url key.
+existingSecret: bunker-database
+service:
+  publicPort: 8443
+  hostPort: 8444
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: '1'
+    memory: 1Gi
+networkPolicy:
+  enabled: false
+  # Enable only after selecting the PostgreSQL server's network range.
+  databaseCIDR: ''
+  databasePort: 5432
+  # Explicit provider HTTPS egress ranges, or adapt to your CNI/egress proxy.
+  identityCIDRs: []
+
+# Disabled unless both deployment and tenant policy opt in.
+notifications:
+  enabled: false
+  replicaCount: 1
+  configSecret: '' # Separate existing Secret, key config.json; no signing bytes.
+  signingSecret: '' # Separate existing Secret, referenced signing filenames only.
+  # Required approved receiver ranges (TCP 443); never inferred from config URLs.
+  httpsCIDRs: []
+  dnsNamespace: kube-system
+  dnsPodLabels: {k8s-app: kube-dns}
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: '1', memory: 512Mi}

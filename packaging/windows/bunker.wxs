@@ -1,0 +1,15 @@
+<!-- WiX v4 template. Produces an unsigned per-machine MSI, not a service installer. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Bunker" Manufacturer="Bunker contributors" Version="$(var.Version)" UpgradeCode="ab41eebc-cf49-4a98-9e69-31fdcbf6fd19" Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Bunker is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Bunker">
+        <Component Id="BunkerBinary" Guid="*">
+          <File Id="BunkerExe" Source="$(var.BinaryPath)" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main" Title="Bunker CLI" Level="1"><ComponentRef Id="BunkerBinary" /></Feature>
+  </Package>
+</Wix>

@@ -1,0 +1,15 @@
+**
+!Cargo.toml
+!Cargo.lock
+!crates
+!crates/**
+!vendor
+!vendor/**
+!fuzz
+!fuzz/**
+**/target
+**/artifacts
+**/coverage
+**/.env*
+**/*.pem
+**/*.key

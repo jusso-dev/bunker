@@ -1,0 +1,25 @@
+[package]
+name = "bunker-git-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[package.metadata]
+cargo-fuzz = true
+[workspace]
+[dependencies]
+libfuzzer-sys = "0.4"
+sha1 = "0.10"
+bunker-git = { path = ".." }
+[[bin]]
+name = "capture_parts"
+path = "fuzz_targets/capture_parts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pack_bytes"
+path = "fuzz_targets/pack_bytes.rs"
+test = false
+doc = false
+bench = false

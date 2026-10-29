@@ -1,0 +1,82 @@
+name: bunker
+services:
+  database:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: bunker
+      POSTGRES_USER: bunker
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets: [postgres-password]
+    volumes:
+      - metadata:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U bunker -d bunker']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  control-plane:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control-plane
+    image: bunker-control-plane:local
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database-url
+      BUNKER_ORIGIN: ${BUNKER_ORIGIN:?set the public HTTPS origin}
+      BUNKER_HOST_ORIGIN: ${BUNKER_HOST_ORIGIN:?set the host mTLS HTTPS origin}
+      BUNKER_ALLOW_INSECURE_LOOPBACK: 'false'
+    secrets: [database-url]
+    volumes:
+      - type: bind
+        source: ${BUNKER_IDENTITY_SECRETS:?set an absolute protected identity directory}
+        target: /run/secrets/bunker
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/bunker:uid=1000,gid=1000,mode=0700
+      - /app/control-plane/.next/cache:uid=1000,gid=1000,mode=0700
+    ports:
+      - '${BUNKER_LISTEN_ADDRESS:-127.0.0.1}:8443:8443'
+      - '${BUNKER_LISTEN_ADDRESS:-127.0.0.1}:8444:8444'
+    healthcheck:
+      test: [CMD, node, control-plane/scripts/healthcheck.mjs]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      database:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: unless-stopped
+  agent:
+    profiles: [agent]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    image: bunker-agent:local
+    volumes:
+      - type: bind
+        source: ${BUNKER_HOST_WORKSPACE:-./workspace}
+        target: /workspace
+        read_only: true
+      - type: bind
+        source: ${BUNKER_HOST_REPOSITORY:-./repository}
+        target: /repository
+    secrets: [passphrase]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+volumes:
+  metadata:
+secrets:
+  postgres-password:
+    file: ${BUNKER_DEPLOY_SECRETS:-./secrets}/postgres-password
+  database-url:
+    file: ${BUNKER_DEPLOY_SECRETS:-./secrets}/database-url
+  passphrase:
+    file: ${BUNKER_DEPLOY_SECRETS:-./secrets}/passphrase

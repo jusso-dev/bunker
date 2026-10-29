@@ -1,0 +1,13 @@
+target/
+node_modules/
+.next/
+coverage/
+.env*
+!.env.example
+*.tsbuildinfo
+.DS_Store
+site/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/
+/.docs-site/

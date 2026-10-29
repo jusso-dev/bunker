@@ -1,0 +1,8 @@
+The image runs a TLS gateway on 8443/8444 and Next on private 127.0.0.1:3000.
+Provision existingSecret (database-url) and identitySecret before starting it.
+Run migrations and bootstrap once with the same image and database.
+Expose the https and mtls Service ports using TCP pass-through; never terminate host mTLS upstream.
+The server certificate must cover both configured HTTPS origins.
+Read docs/user/deployment.md for Secret keys, permissions, provider setup and rotation.
+Exec probes validate server TLS; readiness also exercises gateway proof/database access.
+No live Kubernetes deployment or live identity-provider onboarding is implied by this template.

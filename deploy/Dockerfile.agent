@@ -1,0 +1,16 @@
+FROM rust:1.91-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY vendor ./vendor
+RUN cargo build --locked --release --package bunker
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN groupadd --gid 10001 bunker && useradd --uid 10001 --gid bunker --no-create-home bunker \
+    && mkdir /repository /workspace && chown bunker:bunker /repository
+COPY --from=build /src/target/release/bunker /usr/local/bin/bunker
+COPY --chmod=755 packaging/scripts/run-daemon.sh /usr/local/bin/run-daemon.sh
+ENV BUNKER_REPOSITORY=/repository BUNKER_WORKSPACE=/workspace BUNKER_PASSPHRASE_FILE=/run/secrets/passphrase
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/run-daemon.sh"]

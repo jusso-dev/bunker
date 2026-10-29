@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/bunker", "crates/bunker-discovery", "crates/bunker-keys", "crates/bunker-git"]
+resolver = "3"
+exclude = ["vendor/reqsign-azure-storage"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.91"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# Upstream Azure certificate credentials hard-enable vulnerable RSA. The local
+# feature-only patch preserves the provider API while Bunker disables that path.
+[patch.crates-io]
+reqsign-azure-storage = { path = "vendor/reqsign-azure-storage" }

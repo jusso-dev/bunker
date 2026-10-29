@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.bunker.agent</string>
+  <key>ProgramArguments</key><array><string>/usr/local/libexec/bunker/run-daemon.sh</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BUNKER_REPOSITORY</key><string>/REPLACE/absolute/repository</string>
+    <key>BUNKER_WORKSPACE</key><string>/REPLACE/absolute/workspace</string>
+    <key>BUNKER_PASSPHRASE_FILE</key><string>/REPLACE/protected/passphrase-file</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

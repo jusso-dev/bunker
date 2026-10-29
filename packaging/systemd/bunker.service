@@ -1,0 +1,25 @@
+[Unit]
+Description=Bunker workspace backup daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+User=bunker
+Group=bunker
+Environment=BUNKER_REPOSITORY=/var/lib/bunker/repository
+Environment=BUNKER_WORKSPACE=/srv/workspace
+Environment=BUNKER_BINARY=/usr/bin/bunker
+LoadCredential=passphrase:/etc/bunker/passphrase
+ExecStart=/usr/local/libexec/bunker/run-daemon.sh
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bunker
+ReadOnlyPaths=/srv/workspace
+
+[Install]
+WantedBy=multi-user.target

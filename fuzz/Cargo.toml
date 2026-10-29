@@ -1,0 +1,26 @@
+[package]
+name = "bunker-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bunker = { path = "../crates/bunker" }
+serde_json = "1"
+
+[[bin]]
+name = "repository_format"
+path = "fuzz_targets/repository_format.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+[patch.crates-io]
+reqsign-azure-storage = { path = "../vendor/reqsign-azure-storage" }

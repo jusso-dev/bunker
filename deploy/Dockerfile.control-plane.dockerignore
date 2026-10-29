@@ -1,0 +1,15 @@
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!control-plane
+!control-plane/**
+!shared
+!shared/**
+!deploy
+!deploy/control-plane-entrypoint.sh
+**/node_modules
+**/.next
+**/.env*
+**/*.pem
+**/*.key

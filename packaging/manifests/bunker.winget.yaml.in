@@ -1,0 +1,11 @@
+# Proposal only. Replace all placeholders after signed MSI verification.
+PackageIdentifier: Bunker.Bunker
+PackageVersion: '@VERSION@'
+InstallerType: wix
+Scope: machine
+Installers:
+  - Architecture: x64
+    InstallerUrl: '@SIGNED_MSI_URL@'
+    InstallerSha256: '@SIGNED_MSI_SHA256@'
+ManifestType: installer
+ManifestVersion: 1.9.0

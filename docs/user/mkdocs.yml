@@ -1,0 +1,45 @@
+site_name: Bunker development documentation
+site_url: https://jusso-dev.github.io/bunker/
+docs_dir: ..
+site_dir: ../../.docs-site
+theme: readthedocs
+nav:
+  - Start here: user/index.md
+  - Install and services: user/install.md
+  - Quick start: user/quickstart.md
+  - CLI reference: user/cli.md
+  - Policies: user/policies.md
+  - Agent guides: user/agents.md
+  - Storage backends: user/storage.md
+  - Restore and disaster recovery: user/restore.md
+  - Teams and MSPs: user/teams.md
+  - Deployment: user/deployment.md
+  - Security and threat model: user/security.md
+  - Compliance:
+      - Scope and evidence: compliance/index.md
+      - Essential Eight: compliance/essential-eight.md
+      - ISM: compliance/ism.md
+      - Australian residency: compliance/residency.md
+  - Issue evidence: issue-evidence.md
+  - Council review: council-review.md
+  - Discovery implementation: discovery.md
+  - Setup and session capture: setup-capture.md
+  - Git recovery: git-recovery.md
+  - Host integration: host-integration.md
+  - Authenticated host sessions: host-session.md
+  - Host storage policy: host-storage.md
+  - Key management: key-management.md
+  - Local maintenance: maintenance.md
+  - Protected object versions: immutable-storage.md
+  - Consumer storage and OAuth: consumer-storage.md
+  - Trusted restore probes: restore-probes.md
+  - Dependency security: dependency-security.md
+  - Decisions:
+      - Stack proposal: adr/0001-stack.md
+      - New-machine rebuild proposal: adr/0002-agent-rebuild.md
+  - Requirements: requirements.md
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn

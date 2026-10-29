@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-control-plane
+  labels: {app.kubernetes.io/name: bunker, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {app.kubernetes.io/name: bunker, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: bunker, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: control-plane
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - {name: https, containerPort: 8443}
+            - {name: mtls, containerPort: 8444}
+          env:
+            - {name: BUNKER_ORIGIN, value: {{ required "origin is required" .Values.origin | quote }}}
+            - {name: BUNKER_HOST_ORIGIN, value: {{ required "hostOrigin is required" .Values.hostOrigin | quote }}}
+            - {name: BUNKER_ALLOW_INSECURE_LOOPBACK, value: 'false'}
+            {{- if .Values.notifications.enabled }}
+            - {name: BUNKER_NOTIFICATIONS_ENABLED, value: 'true'}
+            {{- end }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "existingSecret is required" .Values.existingSecret | quote }}
+                  key: database-url
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            {{- if .Values.notifications.enabled }}
+            - {name: notification-config, mountPath: /run/secrets/notification-config, readOnly: true}
+            {{- end }}
+            - {name: tmp, mountPath: /tmp}
+            - {name: identity-source, mountPath: /run/secrets/bunker, readOnly: true}
+            - {name: identity-runtime, mountPath: /run/bunker}
+            - {name: next-cache, mountPath: /app/control-plane/.next/cache}
+          readinessProbe:
+            exec:
+              command: [node, control-plane/scripts/healthcheck.mjs]
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: [node, control-plane/scripts/healthcheck.mjs, --live]
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.notifications.enabled }}
+        - name: notification-config
+          secret:
+            secretName: {{ required "notifications.configSecret required" .Values.notifications.configSecret | quote }}
+            defaultMode: 0440
+            items: [{key: config.json, path: config.json}]
+        {{- end }}
+        - name: identity-source
+          secret:
+            secretName: {{ required "identitySecret is required" .Values.identitySecret | quote }}
+            defaultMode: 0440
+        - name: identity-runtime
+          emptyDir: {medium: Memory, sizeLimit: 2Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+        - name: next-cache
+          emptyDir: {sizeLimit: 128Mi}

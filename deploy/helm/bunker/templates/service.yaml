@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-control-plane
+spec:
+  type: ClusterIP
+  ports:
+    - name: https
+      port: {{ .Values.service.publicPort }}
+      targetPort: https
+    - name: mtls
+      port: {{ .Values.service.hostPort }}
+      targetPort: mtls
+  selector: {app.kubernetes.io/name: bunker, app.kubernetes.io/instance: {{ .Release.Name | quote }}}

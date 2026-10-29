@@ -1,0 +1,28 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-control-plane
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: bunker, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports: [{port: 8443, protocol: TCP}, {port: 8444, protocol: TCP}]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: {{ required "networkPolicy.databaseCIDR must explicitly select your database network" .Values.networkPolicy.databaseCIDR | quote }}
+      ports: [{port: {{ .Values.networkPolicy.databasePort }}, protocol: TCP}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    {{- range .Values.networkPolicy.identityCIDRs }}
+    - to:
+        - ipBlock: {cidr: {{ . | quote }}}
+      ports: [{port: 443, protocol: TCP}]
+    {{- end }}
+{{- end }}

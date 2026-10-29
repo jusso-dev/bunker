@@ -1,0 +1,14 @@
+# Template only: no Homebrew tap or signed release has been published.
+class Bunker < Formula
+  desc "Local encrypted backups for coding-agent workspaces"
+  homepage "https://github.com/jusso-dev/bunker"
+  url "@VERIFIED_RELEASE_ARCHIVE_URL@"
+  sha256 "@VERIFIED_SHA256@"
+  license "Apache-2.0"
+  def install
+    bin.install "bunker"
+  end
+  test do
+    assert_match "bunker", shell_output("#{bin}/bunker --version")
+  end
+end

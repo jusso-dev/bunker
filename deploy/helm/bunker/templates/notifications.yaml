@@ -1,0 +1,97 @@
+{{- if .Values.notifications.enabled }}
+{{- if not .Values.notifications.httpsCIDRs }}
+{{- fail "notifications.httpsCIDRs must explicitly approve receiver networks" }}
+{{- end }}
+{{- if or (eq .Values.notifications.configSecret .Values.notifications.signingSecret) (eq .Values.notifications.configSecret .Values.identitySecret) (eq .Values.notifications.signingSecret .Values.identitySecret) }}
+{{- fail "notification config, signing and identity Secrets must be separate" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-notifications
+spec:
+  replicas: {{ .Values.notifications.replicaCount }}
+  selector:
+    matchLabels: {app.kubernetes.io/name: bunker-notifications, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: bunker-notifications, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: notifications
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [node, --import, ./control-plane/node_modules/tsx/dist/loader.mjs, control-plane/scripts/notification-entrypoint.ts]
+          env:
+            - {name: NODE_ENV, value: production}
+            - {name: BUNKER_NOTIFICATIONS_ENABLED, value: 'true'}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "existingSecret required" .Values.existingSecret | quote }}
+                  key: database-url
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: runtime, mountPath: /run/bunker}
+            - {name: config, mountPath: /run/secrets/notification-config, readOnly: true}
+            - {name: signing, mountPath: /run/secrets/notification-signing, readOnly: true}
+          resources:
+            {{- toYaml .Values.notifications.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+        - name: runtime
+          emptyDir: {medium: Memory, sizeLimit: 2Mi}
+        - name: config
+          secret:
+            secretName: {{ required "notifications.configSecret required" .Values.notifications.configSecret | quote }}
+            defaultMode: 0440
+            items: [{key: config.json, path: config.json}]
+        - name: signing
+          secret:
+            secretName: {{ required "notifications.signingSecret required" .Values.notifications.signingSecret | quote }}
+            defaultMode: 0440
+---
+# Always installed with the worker, independently of the optional API policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-notifications
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: bunker-notifications, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - ipBlock:
+            cidr: {{ required "networkPolicy.databaseCIDR required for notifications" .Values.networkPolicy.databaseCIDR | quote }}
+      ports: [{port: {{ .Values.networkPolicy.databasePort }}, protocol: TCP}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ required "notifications.dnsNamespace required" .Values.notifications.dnsNamespace | quote }}}
+          podSelector:
+            matchLabels:
+              {{- required "notifications.dnsPodLabels required" .Values.notifications.dnsPodLabels | toYaml | nindent 14 }}
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    {{- range .Values.notifications.httpsCIDRs }}
+    - to:
+        - ipBlock: {cidr: {{ . | quote }}}
+      ports: [{port: 443, protocol: TCP}]
+    {{- end }}
+{{- end }}

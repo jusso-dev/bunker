@@ -2,9 +2,11 @@
 
 Backup, rollback and disaster recovery for AI coding agents.
 
-Think of it as Veeam for your agents. Bunker snapshots each agent's full setup (MCP configs, skills, rules, sub-agents, hooks, memory and settings) and the workspace it works in, so you can undo a bad file edit, roll back a whole agent session, or recover a workspace after something goes wrong.
+Bunker snapshots eligible workspace files and explicitly configured global agent setup, with encrypted Git branch/stash/index recovery and reviewed restores. Setup capture uses per-root encrypted scope metadata; it never automatically writes back to source locations.
 
-> **Status: planning.** Nothing here is ready to use yet. See [docs/requirements.md](docs/requirements.md) and the epic issue for the build plan.
+> **Status: experimental implementation, not a completed v1.** Local encrypted snapshots, reviewed file restores, discovery adapters, encrypted replication, and a development control plane are implemented. Production identity, managed keys, Git recovery and version-protected S3/Azure replication are implemented with fixture coverage. Live-provider, native-agent, cross-platform and several workflow acceptance requirements remain incomplete. See [the acceptance evidence](docs/issue-evidence.md) before relying on a backup.
+
+Start with the [local quick start](docs/user/quickstart.md), [restore runbook](docs/user/restore.md), and [security model](docs/user/security.md). Run `cargo test --workspace` and `pnpm test` from this checkout; use Rust 1.91+ and the pnpm version pinned in `package.json`.
 
 ## Why
 
@@ -17,7 +19,7 @@ Coding agents now edit files, run commands and rewrite config on their own. Git 
 - MSPs backing up client environments
 - Government and enterprise
 
-## Scope for v1
+## Target scope for v1
 
 - **Agents:** Claude Code, Cursor, Codex, GitHub Copilot and Kiro
 - **Runs on:** laptops, servers and cloud VMs, CI runners, and containers
@@ -56,12 +58,12 @@ Rebuilding an agent from scratch on a new machine is planned for a later release
 Key points:
 
 - Data is encrypted on the host before it leaves. The control plane never sees plaintext file contents.
-- Agents can request a restore through MCP, but a human approves it. Agents can never delete backups.
+- The MCP interface exposes listing, preview, and restore-request operations, with no backup-delete operation. The production host bridge executes only independently approved, saved plans; legacy local request execution remains disabled. A process with filesystem access under the same OS identity can still alter or delete repository files.
 - See [docs/adr/0001-stack.md](docs/adr/0001-stack.md) for the stack choice.
 
 ## Contributing
 
-Early days. Issues and discussion are welcome, and the epic lists the build order.
+The epic lists the build order. Features are complete only when their acceptance criteria have evidence; scaffolding or a passing local test does not establish cloud, signing, or cross-platform readiness.
 
 ## Licence
 

@@ -1,0 +1,18 @@
+name: Bunker end-of-job snapshot
+description: Snapshot to an existing repository in the action post phase.
+inputs:
+  repository:
+    description: Absolute path to an initialized, persistent Bunker repository outside the workspace.
+    required: true
+  workspace:
+    description: Workspace path; defaults to GITHUB_WORKSPACE.
+    required: false
+  binary:
+    description: Installed bunker binary name or absolute path.
+    default: bunker
+    required: false
+runs:
+  using: node20
+  main: main.cjs
+  post: post.cjs
+  post-if: always()
