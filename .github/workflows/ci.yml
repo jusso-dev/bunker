@@ -102,7 +102,7 @@ jobs:
       - run: node --test .github/actions/snapshot/action.test.cjs
       - run: shellcheck packaging/scripts/*.sh deploy/*.sh
       - run: mkdocs build --strict --config-file docs/user/mkdocs.yml --site-dir "$RUNNER_TEMP/bunker-docs"
-      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.17.3
       - run: helm lint deploy/helm/bunker && helm template bunker deploy/helm/bunker > "$RUNNER_TEMP/bunker-chart.yaml"
