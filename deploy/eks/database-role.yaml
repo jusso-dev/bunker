@@ -1,0 +1,56 @@
+# First deployment only. Schema migrations run separately with the app role.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: bunker-database-role, namespace: bunker}
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      nodeSelector: {kubernetes.io/arch: amd64}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: database-role
+          image: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/bunker/control-plane:0c0d4ea
+          command: [node, --input-type=module, -e]
+          args:
+            - |
+              import pg from './control-plane/node_modules/pg/lib/index.js';
+              const db = new pg.Client({connectionString: process.env.ADMIN_URL, connectionTimeoutMillis: 5000});
+              try {
+                await db.connect();
+                await db.query('BEGIN');
+                await db.query('SELECT pg_advisory_xact_lock(726033)');
+                if (!(await db.query("SELECT 1 FROM pg_roles WHERE rolname='bunker_app'")).rowCount) {
+                  await db.query('CREATE ROLE bunker_app LOGIN PASSWORD ' + pg.escapeLiteral(process.env.APP_PASSWORD));
+                }
+                await db.query('GRANT CONNECT, CREATE ON DATABASE bunker TO bunker_app');
+                await db.query('GRANT USAGE, CREATE ON SCHEMA public TO bunker_app');
+                await db.query('COMMIT');
+                console.log('Application database role ready.');
+              } catch {
+                console.error('Database role provisioning failed.');
+                process.exitCode = 1;
+              } finally { await db.end(); }
+          env:
+            - name: ADMIN_URL
+              valueFrom: {secretKeyRef: {name: bunker-db-admin, key: admin-url}}
+            - name: APP_PASSWORD
+              valueFrom: {secretKeyRef: {name: bunker-db-admin, key: app-password}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: identity, mountPath: /run/secrets/bunker, readOnly: true}
+      volumes:
+        - name: identity
+          secret: {secretName: bunker-identity, defaultMode: 0440}

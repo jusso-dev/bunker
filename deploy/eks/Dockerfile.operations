@@ -1,0 +1,6 @@
+FROM python:3.13-slim-bookworm
+RUN pip install --no-cache-dir boto3==1.42.97 cryptography==50.0.2
+WORKDIR /app
+COPY deploy/eks/sync_certificate.py /app/sync_certificate.py
+USER 1000:1000
+CMD ["python", "/app/sync_certificate.py"]

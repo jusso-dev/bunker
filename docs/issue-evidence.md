@@ -87,3 +87,38 @@ native-agent behavior, platform runtime/service validation, power-loss behavior,
 and residency/compliance attestations remain acceptance gaps. Unsupported policy
 combinations fail closed. **This is not a completed-v1 or release-readiness claim;
 #26 remains deferred.**
+
+## EKS deployment evidence (30 October 2026)
+
+The control plane was deployed to AWS `yumait-prod`, namespace `bunker`, using
+application commit `0c0d4ea` and ECR digest
+`sha256:6d74e9a45bb69f0062c1d7b92de5169b6551c5f45d92a979e1e38128f15efd4b`.
+The console is `https://bunker.yumait.au`; hosts use
+`https://hosts.bunker.yumait.au:8444`. Private encrypted RDS has seven-day backups
+and deletion protection. Migrations 001–004 and initial administrator bootstrap
+completed. TLS verification remained enabled throughout deployment.
+
+Live checks passed for public TLS, console/provider readiness, administrator
+login, admin tenant access, session listing, logout invalidation and rejection of
+host requests without a client certificate. A live certificate-sync Job passed
+and the resulting application rollout became ready. Three offline tests cover
+certificate refresh, preservation of host keys/trust roots, interrupted-rollout
+repair and refusal to restart before Secret projection. Helm lint, Kubernetes
+server dry runs, syntax/local-link checks and diff review cover the new deployment
+configuration.
+
+Deployment fixes supplied self-signed Amazon probe trust anchors and an explicit
+DNS rule for EKS Auto Mode's managed resolver. Initial database role provisioning
+and schema migration now use separate Jobs. The initial failed attempts made no
+committed schema change; the final migration Job completed successfully.
+
+This is control-plane deployment evidence, not whole-product acceptance. Real
+host enrollment/capture, external storage providers, native agents, database
+restore drills, HA and disaster recovery remain separate acceptance work. See the
+[EKS runbook](../deploy/eks/README.md) for operations and limitations.
+
+The [GitHub CI run for application commit 0c0d4ea](https://github.com/jusso-dev/bunker/actions/runs/40974792833)
+is not green: Windows Clippy, Linux Rust tests, the macOS restore smoke and the
+built-gateway fixture failed; documentation/packaging passed. These failures were
+observed during deployment and remain separate follow-up work. The live checks
+above do not override or resolve those CI failures.

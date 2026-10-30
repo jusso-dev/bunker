@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: bunker-certificate-sync, namespace: bunker}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: bunker-certificate-sync, namespace: bunker}
+rules:
+  - apiGroups: ['']
+    resources: [secrets]
+    resourceNames: [bunker-identity]
+    verbs: [get]
+  - apiGroups: [external-secrets.io]
+    resources: [externalsecrets]
+    resourceNames: [bunker-identity]
+    verbs: [patch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [bunker-control-plane]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: bunker-certificate-sync, namespace: bunker}
+subjects: [{kind: ServiceAccount, name: bunker-certificate-sync, namespace: bunker}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: bunker-certificate-sync}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: bunker-certificate-sync, namespace: bunker}
+spec:
+  podSelector: {matchLabels: {app: bunker-certificate-sync}}
+  policyTypes: [Egress]
+  egress:
+    - ports: [{protocol: TCP, port: 443}]
+    - to: [{ipBlock: {cidr: 169.254.170.23/32}}]
+      ports: [{protocol: TCP, port: 80}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: bunker-certificate-sync, namespace: bunker}
+spec:
+  schedule: '17 2 * * *'
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels: {app: bunker-certificate-sync}
+        spec:
+          serviceAccountName: bunker-certificate-sync
+          restartPolicy: Never
+          nodeSelector: {kubernetes.io/arch: amd64}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: sync
+              image: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/bunker/operations:tls-sync-v2
+              env:
+                - name: CERTIFICATE_ARN
+                  value: arn:aws:acm:ap-southeast-2:959038055523:certificate/0b9bb6f7-f4c6-4d56-aafb-5f84cfec3947
+                - {name: PYTHONDONTWRITEBYTECODE, value: '1'}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: [ALL]}
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits: {cpu: 250m, memory: 256Mi}

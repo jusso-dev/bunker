@@ -12,6 +12,10 @@ spec:
       labels: {app.kubernetes.io/name: bunker, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
     spec:
       automountServiceAccountToken: false
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -21,6 +25,7 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: control-plane
           image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}

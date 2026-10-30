@@ -1,0 +1,29 @@
+image:
+  repository: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/bunker/control-plane
+  tag: 0c0d4ea
+nodeSelector:
+  kubernetes.io/arch: amd64
+origin: https://bunker.yumait.au
+hostOrigin: https://hosts.bunker.yumait.au:8444
+identitySecret: bunker-identity
+existingSecret: bunker-database
+service:
+  type: LoadBalancer
+  loadBalancerClass: eks.amazonaws.com/nlb
+  publicPort: 443
+  hostPort: 8444
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: TCP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: '8443'
+    service.beta.kubernetes.io/aws-load-balancer-attributes: load_balancing.cross_zone.enabled=true
+    service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: Application=bunker
+resources:
+  requests: {cpu: 100m, memory: 512Mi}
+  limits: {cpu: '1', memory: 1Gi}
+# Namespace-wide EKS-specific policy is in prerequisites.yaml.
+networkPolicy:
+  enabled: false
+notifications:
+  enabled: false

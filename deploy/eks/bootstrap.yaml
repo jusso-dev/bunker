@@ -1,0 +1,60 @@
+# First deployment only. Never run this to reset an existing administrator.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: {name: bunker-bootstrap, namespace: bunker}
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: aws-secretsmanager}
+  target: {name: bunker-bootstrap, creationPolicy: Owner, deletionPolicy: Retain}
+  dataFrom: [{extract: {key: bunker-eks-bootstrap}}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: bunker-bootstrap, namespace: bunker}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      nodeSelector: {kubernetes.io/arch: amd64}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: bootstrap
+          image: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/bunker/control-plane:0c0d4ea
+          command: [node, --input-type=module, -e]
+          args:
+            - |
+              import {readFileSync} from 'node:fs';
+              import {spawnSync} from 'node:child_process';
+              const email = readFileSync('/run/bootstrap/email', 'utf8');
+              const result = spawnSync(process.execPath, ['control-plane/node_modules/tsx/dist/cli.mjs',
+                'control-plane/scripts/bootstrap.ts', email, 'Yuma IT', 'Yuma IT'], {
+                input: readFileSync('/run/bootstrap/password'), stdio: ['pipe', 'inherit', 'inherit']
+              });
+              process.exit(result.status ?? 1);
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: bunker-database, key: database-url}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: identity, mountPath: /run/secrets/bunker, readOnly: true}
+            - {name: bootstrap, mountPath: /run/bootstrap, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: identity
+          secret: {secretName: bunker-identity, defaultMode: 0440}
+        - name: bootstrap
+          secret: {secretName: bunker-bootstrap, defaultMode: 0440}
+        - name: tmp
+          emptyDir: {sizeLimit: 16Mi}

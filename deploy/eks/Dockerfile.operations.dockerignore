@@ -1,0 +1,4 @@
+**
+!deploy
+!deploy/eks
+!deploy/eks/sync_certificate.py

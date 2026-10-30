@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bunker
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: {name: bunker-database, namespace: bunker}
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: aws-secretsmanager}
+  target: {name: bunker-database, creationPolicy: Owner, deletionPolicy: Retain}
+  dataFrom: [{extract: {key: bunker-eks-database}}]
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: {name: bunker-db-admin, namespace: bunker}
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: aws-secretsmanager}
+  target: {name: bunker-db-admin, creationPolicy: Owner, deletionPolicy: Retain}
+  dataFrom: [{extract: {key: bunker-eks-db-admin}}]
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: {name: bunker-identity, namespace: bunker}
+spec:
+  refreshInterval: 5m
+  secretStoreRef: {kind: ClusterSecretStore, name: aws-secretsmanager}
+  target:
+    name: bunker-identity
+    creationPolicy: Owner
+    deletionPolicy: Retain
+    template:
+      engineVersion: v2
+      data:
+        tls.key: '{{ index . "tls.key" }}'
+        tls.crt: '{{ index . "tls.crt" }}'
+        tls-ca.crt: '{{ index . "tls-ca.crt" }}'
+        ca.key: '{{ index . "ca.key" }}'
+        ca.crt: '{{ index . "ca.crt" }}'
+        gateway.secret: '{{ index . "gateway.secret" | b64dec }}'
+        providers.json: '{{ index . "providers.json" }}'
+        rds-ca.pem: '{{ index . "rds-ca.pem" }}'
+  dataFrom: [{extract: {key: bunker-eks-identity}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: bunker-runtime, namespace: bunker}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8443}, {protocol: TCP, port: 8444}]
+  egress:
+    # EKS Auto Mode's managed resolver has no selectable kube-system Pod.
+    - to: [{ipBlock: {cidr: 10.100.0.10/32}}]
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}}]
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to: [{ipBlock: {cidr: 172.31.0.0/16}}]
+      ports: [{protocol: TCP, port: 5432}]

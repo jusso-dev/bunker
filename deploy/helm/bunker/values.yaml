@@ -4,6 +4,7 @@ image:
   tag: local
   pullPolicy: IfNotPresent
 imagePullSecrets: []
+nodeSelector: {}
 origin: https://bunker.example.invalid
 hostOrigin: https://hosts.bunker.example.invalid
 # Mounted into a private runtime directory; see docs/user/deployment.md for keys.
@@ -11,6 +12,9 @@ identitySecret: bunker-identity
 # Must already exist in the release namespace, with a database-url key.
 existingSecret: bunker-database
 service:
+  type: ClusterIP
+  annotations: {}
+  loadBalancerClass: ''
   publicPort: 8443
   hostPort: 8444
 resources:
