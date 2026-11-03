@@ -663,3 +663,150 @@ fn cli_restore_probe_rejects_runtime_paths_in_all_captured_boundaries() {
         }
     }
 }
+
+/// Fixture files from `fixtures/discovery/layout.json` that belong to one agent.
+fn agent_fixture(agent: &str) -> Vec<(String, String)> {
+    let prefixes: &[&str] = match agent {
+        "claude-code" => &[".claude/", ".claude.json", "CLAUDE.md", ".mcp.json"],
+        "cursor" => &[".cursor/", ".cursorrules", "Cursor/"],
+        "codex" => &[".codex/", "AGENTS.md"],
+        "copilot" => &[
+            ".copilot/",
+            ".github/",
+            ".vscode/",
+            "Code/",
+            "github-copilot/",
+        ],
+        "kiro" => &[".kiro/", "Kiro/"],
+        _ => unreachable!(),
+    };
+    let layout: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/discovery/layout.json")).unwrap();
+    let mut files = vec![];
+    for section in ["home", "workspace", "editor", "jetbrains"] {
+        for (relative, text) in layout[section].as_object().unwrap() {
+            // The OAuth store is a hard credential exclusion, never captured.
+            if prefixes.iter().any(|p| relative.starts_with(p)) && !relative.ends_with("apps.json")
+            {
+                files.push((
+                    format!("{section}/{relative}"),
+                    text.as_str().unwrap().to_owned(),
+                ));
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn each_agent_fixture_backs_up_restores_and_passes_restore_test() {
+    struct Expect {
+        files: Vec<(String, String)>,
+        calls: usize,
+    }
+    impl ProbeExecutor for Expect {
+        fn prepare(&mut self, root: &Path) -> Result<(), ProbeSkip> {
+            for (path, _) in &self.files {
+                assert!(root.join(path).is_file(), "{path} not restored");
+            }
+            assert!(!root.join("repository").exists());
+            Ok(())
+        }
+        fn execute(&mut self, _: ProbeRequest<'_>) -> ProbeOutcome {
+            self.calls += 1;
+            ProbeOutcome::Passed
+        }
+        fn cleanup(&mut self) -> Result<(), ProbeFailure> {
+            Ok(())
+        }
+    }
+    for agent in ["claude-code", "cursor", "codex", "copilot", "kiro"] {
+        let files = agent_fixture(agent);
+        assert!(files.len() >= 3, "{agent} fixture too small");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let work = root.join("workspace");
+        for (path, text) in &files {
+            let target = work.join(path);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(target, text).unwrap();
+        }
+        let repo = repository::Repository::init(&root.join("repository"), "fixture-only").unwrap();
+        let snapshot = repo
+            .snapshot(
+                &work,
+                &bunker::policy::Policy::default(),
+                Some(agent.into()),
+                None,
+                "manual",
+            )
+            .unwrap();
+        assert_eq!(
+            snapshot.files.len(),
+            files.len(),
+            "{agent} capture incomplete"
+        );
+        repo.verify(&snapshot.id).unwrap();
+        // Backup -> restore into a fresh destination.
+        let destination = root.join("restored");
+        fs::create_dir(&destination).unwrap();
+        let plan = repo.plan(&snapshot.id, &destination, None).unwrap();
+        assert!(plan.changes.iter().all(|c| c.action == "create"));
+        repo.restore(&snapshot.id, &destination, None, &plan.confirmation)
+            .unwrap();
+        for (path, text) in &files {
+            let restored = fs::read_to_string(destination.join(path)).unwrap();
+            let entry = snapshot.files.iter().find(|f| f.path == *path).unwrap();
+            if !entry.sanitized {
+                assert_eq!(&restored, text, "{agent} {path} not byte-exact");
+            }
+            assert!(
+                !restored.contains("fake-"),
+                "{agent} {path} leaked a credential"
+            );
+        }
+        // -> restore test with an agent boot and MCP probe for this agent.
+        let mut cfg = config();
+        cfg.agents[0].agent = agent.into();
+        // Captured credential references fail closed: no executor ever starts.
+        let mut executor = Expect {
+            files: vec![],
+            calls: 0,
+        };
+        let evidence = run_restore_probes(&repo, &snapshot.id, &cfg, &mut executor).unwrap();
+        assert_eq!(executor.calls, 0);
+        assert_eq!(
+            evidence.agents[0].outcome,
+            ProbeOutcome::NotRunWithReason(ProbeSkip::CredentialsUnavailable)
+        );
+        // The credential-free configuration of the same agent boots and initializes MCP.
+        let (with_references, files): (Vec<_>, Vec<_>) =
+            files.into_iter().partition(|(path, _)| {
+                snapshot
+                    .files
+                    .iter()
+                    .any(|f| f.path == *path && !f.secret_references.is_empty())
+            });
+        assert!(!with_references.is_empty() && files.len() >= 2, "{agent}");
+        for (path, _) in &with_references {
+            fs::remove_file(work.join(path)).unwrap();
+        }
+        let clean = repo
+            .snapshot(
+                &work,
+                &bunker::policy::Policy::default(),
+                Some(agent.into()),
+                None,
+                "manual",
+            )
+            .unwrap();
+        assert_eq!(clean.files.len(), files.len(), "{agent} clean capture");
+        let mut executor = Expect { files, calls: 0 };
+        let evidence = run_restore_probes(&repo, &clean.id, &cfg, &mut executor).unwrap();
+        assert_eq!(executor.calls, 2);
+        assert_eq!(evidence.snapshot, clean.id);
+        assert_eq!(evidence.agents[0].agent, agent);
+        assert_eq!(evidence.agents[0].outcome, ProbeOutcome::Passed);
+        assert_eq!(evidence.mcps[0].outcome, ProbeOutcome::Passed);
+    }
+}

@@ -30,14 +30,180 @@ fn fixture(platform: Platform) -> (TempDir, DiscoveryContext) {
             root.join("roaming")
         }
     };
+    let jetbrains = jetbrains_base(&context);
     let layout: Value =
         serde_json::from_str(include_str!("../../../fixtures/discovery/layout.json")).unwrap();
-    for (section, target) in [("home", home), ("workspace", workspace), ("editor", editor)] {
+    for (section, target) in [
+        ("home", home),
+        ("workspace", workspace),
+        ("editor", editor),
+        ("jetbrains", jetbrains),
+    ] {
         for (relative, text) in layout[section].as_object().unwrap() {
             write(&target, relative, text.as_str().unwrap());
         }
     }
     (temp, context)
+}
+
+/// JetBrains Copilot plugin configuration base, per platform convention.
+fn jetbrains_base(context: &DiscoveryContext) -> PathBuf {
+    match context.platform {
+        Platform::Linux => context.config_dir.clone().unwrap(),
+        Platform::MacOs => context.home.join(".config"),
+        Platform::Windows => context.home.join("AppData/Local"),
+    }
+}
+
+#[test]
+fn every_agent_reports_every_supported_category_on_each_platform() {
+    use ItemCategory::*;
+    let expected = [
+        (
+            AgentId::ClaudeCode,
+            vec![McpConfig, Settings, Skill, Rule, SubAgent, Hook, Memory],
+        ),
+        (
+            AgentId::Cursor,
+            vec![McpConfig, Settings, Skill, Rule, SubAgent, Hook],
+        ),
+        (
+            AgentId::Codex,
+            vec![Settings, Skill, Rule, SubAgent, Hook, Memory],
+        ),
+        (
+            AgentId::GitHubCopilot,
+            vec![McpConfig, Settings, Skill, Rule, SubAgent, Hook],
+        ),
+        (
+            AgentId::Kiro,
+            vec![McpConfig, Settings, Skill, Rule, SubAgent, Hook],
+        ),
+    ];
+    for platform in [Platform::Linux, Platform::MacOs, Platform::Windows] {
+        let (_temp, context) = fixture(platform);
+        let results = discover(&context, &SafetyPolicy::default()).unwrap();
+        for (agent, categories) in &expected {
+            let result = results.iter().find(|r| r.agent == *agent).unwrap();
+            let groups = result.by_category();
+            for category in categories {
+                assert!(
+                    groups.get(category).is_some_and(|items| !items.is_empty()),
+                    "{platform:?} {agent:?} missing {category:?}"
+                );
+            }
+            assert!(groups
+                .values()
+                .flatten()
+                .all(|item| item.agent == *agent && categories.contains(&item.category)));
+        }
+        let has = |agent: AgentId, root: &Path, path: &str, category: ItemCategory| {
+            results
+                .iter()
+                .find(|r| r.agent == agent)
+                .unwrap()
+                .items
+                .iter()
+                .any(|i| {
+                    i.root == root && i.relative_path == Path::new(path) && i.category == category
+                })
+        };
+        let workspace = &context.workspace_roots[0];
+        assert!(has(
+            AgentId::Cursor,
+            workspace,
+            ".cursor/environment.json",
+            Settings
+        ));
+        let jetbrains = jetbrains_base(&context);
+        assert!(has(
+            AgentId::GitHubCopilot,
+            &jetbrains,
+            "github-copilot/intellij/mcp.json",
+            McpConfig
+        ));
+        assert!(has(
+            AgentId::GitHubCopilot,
+            &jetbrains,
+            "github-copilot/intellij/global-copilot-instructions.md",
+            Rule
+        ));
+        // OAuth stores next to the plugin configuration are never candidates.
+        let policy = ExclusionPolicy::new(&SafetyPolicy::default()).unwrap();
+        for store in ["github-copilot/apps.json", "github-copilot/hosts.json"] {
+            assert_eq!(
+                policy.reason(Path::new(store)).unwrap(),
+                Some(ExclusionReason::Credentials)
+            );
+        }
+        assert!(!results
+            .iter()
+            .flat_map(|r| &r.items)
+            .any(|i| i.relative_path.ends_with("apps.json")));
+        let editor = match platform {
+            Platform::Linux => context.config_dir.clone().unwrap(),
+            Platform::MacOs => context.home.join("Library/Application Support"),
+            Platform::Windows => context.app_data.clone().unwrap(),
+        };
+        assert!(has(
+            AgentId::GitHubCopilot,
+            &editor,
+            "Code/User/prompts/plan.prompt.md",
+            Skill
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_managed_settings_are_reported_without_failing_discovery() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, context) = fixture(Platform::Linux);
+    let editor = context.config_dir.clone().unwrap();
+    let managed = editor.join("Code/User/settings.json");
+    write(
+        &editor,
+        "Code/User/settings.json",
+        "{\"github.copilot.enable\":{\"*\":false}}",
+    );
+    let locked = context.home.join(".copilot/agents");
+    let restore = |mode| {
+        fs::set_permissions(&managed, fs::Permissions::from_mode(mode)).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(mode | 0o100)).unwrap();
+    };
+    restore(0o000);
+    if fs::File::open(&managed).is_ok() {
+        // Privileged runners ignore permission bits; nothing to assert.
+        restore(0o600);
+        return;
+    }
+    let results = discover(&context, &SafetyPolicy::default());
+    restore(0o600);
+    let results = results.unwrap();
+    assert_eq!(results.len(), 5);
+    let copilot = results
+        .iter()
+        .find(|r| r.agent == AgentId::GitHubCopilot)
+        .unwrap();
+    for (root, path) in [
+        (&editor, "Code/User/settings.json"),
+        (&context.home, ".copilot/agents"),
+    ] {
+        assert!(
+            copilot.excluded.iter().any(|e| &e.root == root
+                && e.relative_path == Path::new(path)
+                && e.reason == ExclusionReason::Unreadable),
+            "{path} not reported unreadable"
+        );
+        assert!(!copilot
+            .items
+            .iter()
+            .any(|i| i.relative_path.starts_with(path)));
+    }
+    assert!(copilot
+        .items
+        .iter()
+        .any(|i| i.relative_path == Path::new(".copilot/mcp-config.json")));
 }
 
 #[test]
@@ -93,6 +259,9 @@ fn five_agents_on_three_platform_layouts_and_safe_preparation() {
                 "fake-copilot-credential",
                 "fake-kiro-credential",
                 "fake-editor-credential",
+                "fake-cursor-background-credential",
+                "fake-jetbrains-credential",
+                "fake-jetbrains-oauth",
                 "customer-fixture-data",
             ] {
                 assert!(!serialized.contains(marker));

@@ -864,6 +864,86 @@ fn ambiguous_creation_is_once_and_keeps_only_encrypted_local_intent() {
     );
 }
 #[test]
+fn session_rollback_is_requested_approved_and_executed_as_session_kind() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root.join("repo"), "fixture-only-passphrase").unwrap();
+    let work = root.join("work");
+    fs::create_dir(&work).unwrap();
+    fs::write(work.join("edited.txt"), "pre-session").unwrap();
+    fs::write(work.join("removed.txt"), "pre-session removed").unwrap();
+    let capture = |trigger: &str| {
+        repo.snapshot(
+            &work,
+            &policy::Policy::default(),
+            Some("codex".into()),
+            Some("private-bridge-session".into()),
+            trigger,
+        )
+        .unwrap()
+    };
+    capture(repository::SESSION_START);
+    fs::write(work.join("edited.txt"), "agent edit").unwrap();
+    fs::remove_file(work.join("removed.txt")).unwrap();
+    fs::write(work.join("created.txt"), "agent created").unwrap();
+    capture(repository::SESSION_END);
+    let rollback = repo.session_rollback("private-bridge-session").unwrap();
+    let consumed = ConsumedRequests::open(&private_dir(&root, "consumed")).unwrap();
+    let transport = FakeTransport::new();
+    let state = transport.0.clone();
+    let mut client = HostClient::new(transport, identity());
+    // The fixture server reuses one request ID, so the refused attempt has its own claim state.
+    let refused = ConsumedRequests::open(&private_dir(&root, "consumed-refused")).unwrap();
+    let request = client
+        .request_restore(&repo, &refused, &rollback.rollback_snapshot, &work, None)
+        .unwrap();
+    {
+        let state = state.lock().unwrap();
+        let body = state.restore.as_ref().unwrap();
+        assert_eq!(body["kind"], "session");
+        let actions: Vec<_> = body["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(actions.len(), 2);
+        assert!(actions.contains(&"replace") && actions.contains(&"create"));
+        let wire = serde_json::to_string(&state.calls).unwrap();
+        for secret in ["private-bridge-session", "edited.txt", "pre-session"] {
+            assert!(!wire.contains(secret));
+        }
+    }
+    // An approval relabelled as a workspace restore is refused without writing.
+    state.lock().unwrap().restore.as_mut().unwrap()["kind"] = json!("workspace");
+    assert!(client
+        .execute_restore_once(&repo, &refused, &request.local_request_id)
+        .is_err());
+    assert_eq!(
+        fs::read_to_string(work.join("edited.txt")).unwrap(),
+        "agent edit"
+    );
+    let request = client
+        .request_restore(&repo, &consumed, &rollback.rollback_snapshot, &work, None)
+        .unwrap();
+    client
+        .execute_restore_once(&repo, &consumed, &request.local_request_id)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(work.join("edited.txt")).unwrap(),
+        "pre-session"
+    );
+    assert_eq!(
+        fs::read_to_string(work.join("removed.txt")).unwrap(),
+        "pre-session removed"
+    );
+    // Restore never deletes; the session-created file stays for manual review.
+    assert_eq!(
+        fs::read_to_string(work.join("created.txt")).unwrap(),
+        "agent created"
+    );
+}
+#[test]
 fn stable_snapshot_ids_and_local_opaque_file_metadata() {
     let f = RestoreFixture::new();
     let first = identity().snapshot_id(&f.snapshot).unwrap();

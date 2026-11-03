@@ -114,14 +114,22 @@ enum Command {
     },
     List,
     Diff {
-        snapshot: String,
+        #[arg(required_unless_present = "session")]
+        snapshot: Option<String>,
+        /// Roll back files changed during this agent session to their pre-session state.
+        #[arg(long, conflicts_with = "snapshot")]
+        session: Option<String>,
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
         file: Option<String>,
     },
     Restore {
-        snapshot: String,
+        #[arg(required_unless_present = "session")]
+        snapshot: Option<String>,
+        /// Roll back files changed during this agent session to their pre-session state.
+        #[arg(long, conflicts_with = "snapshot")]
+        session: Option<String>,
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
@@ -274,7 +282,11 @@ enum HostAction {
         token_env: Option<String>,
     },
     RequestRestore {
-        snapshot: String,
+        #[arg(required_unless_present = "session")]
+        snapshot: Option<String>,
+        /// Request a session rollback to the pre-session state.
+        #[arg(long, conflicts_with = "snapshot")]
+        session: Option<String>,
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
@@ -394,7 +406,7 @@ fn capture_session(
             policy,
             Some(event.agent.as_str().into()),
             Some(event.session_id.clone()),
-            "session-end",
+            bunker::repository::SESSION_END,
         ) {
             Ok(snapshot) => snapshots.push(snapshot.id),
             Err(_) => failed += 1,
@@ -404,8 +416,24 @@ fn capture_session(
     repo.audit("session_end_captured", serde_json::json!({"workspace_snapshots":snapshots,"setup_snapshots":setup.iter().map(|m|&m.id).collect::<Vec<_>>(),"failed_scopes":failed}))?;
     anyhow::ensure!(failed == 0, "one or more configured workspace snapshots failed; successful setup/workspace snapshots were retained");
     Ok(
-        serde_json::json!({"workspace_snapshots":snapshots,"setup_snapshots":setup.iter().map(|m|&m.id).collect::<Vec<_>>() }),
+        serde_json::json!({"session":event.session_id,"workspace_snapshots":snapshots,"setup_snapshots":setup.iter().map(|m|&m.id).collect::<Vec<_>>() }),
     )
+}
+/// Resolves an explicit snapshot, or a session's derived rollback restore point.
+fn restore_target(
+    repo: &Repository,
+    snapshot: Option<String>,
+    session: Option<String>,
+) -> Result<String> {
+    match (snapshot, session) {
+        (Some(snapshot), None) => Ok(snapshot),
+        (None, Some(session)) => {
+            let rollback = repo.session_rollback(&session)?;
+            print(&rollback)?;
+            Ok(rollback.rollback_snapshot)
+        }
+        _ => anyhow::bail!("pass exactly one of SNAPSHOT or --session"),
+    }
 }
 #[derive(Debug)]
 struct SessionExit(i32);
@@ -494,10 +522,28 @@ fn run() -> Result<()> {
             home,
             workspace.clone(),
         );
-        return print(bunker_discovery::discover(
-            &context,
-            &bunker_discovery::SafetyPolicy::default(),
-        )?);
+        let results =
+            bunker_discovery::discover(&context, &bunker_discovery::SafetyPolicy::default())?;
+        let mut output = serde_json::to_value(&results)?;
+        // Additive field: existing per-agent fields are unchanged.
+        for (result, value) in results
+            .iter()
+            .zip(output.as_array_mut().into_iter().flatten())
+        {
+            value["by_category"] = serde_json::to_value(
+                result
+                    .by_category()
+                    .into_iter()
+                    .map(|(category, items)| {
+                        (
+                            category,
+                            items.into_iter().map(|i| i.path()).collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )?;
+        }
+        return print(output);
     }
     let key_source = if let Command::Recover {
         escrow: Some(path), ..
@@ -749,6 +795,27 @@ fn run() -> Result<()> {
             anyhow::ensure!(session_id.is_some(), "host session-run requires --session-id so pending capture/delivery can be retried with the same event");
         }
         let policy = Policy::load(cli.policy.as_deref())?;
+        if host_config.is_none() && !workspace.is_empty() {
+            // Pre-session baseline for `restore --session`; release the lock before the child runs.
+            let captured =
+                Repository::open_with_key_source(&cli.repo, &key_source).and_then(|repo| {
+                    for path in workspace {
+                        repo.snapshot(
+                            path,
+                            &policy,
+                            Some(event.agent.as_str().into()),
+                            Some(event.session_id.clone()),
+                            bunker::repository::SESSION_START,
+                        )?;
+                    }
+                    Ok(())
+                });
+            if let Err(error) = captured {
+                eprintln!(
+                    "Pre-session capture failed; session rollback will be unavailable: {error:#}"
+                );
+            }
+        }
         let cancelled = Arc::new(AtomicBool::new(false));
         let signal_flag = Arc::clone(&cancelled);
         ctrlc::set_handler(move || signal_flag.store(true, Ordering::SeqCst))?;
@@ -851,10 +918,12 @@ fn run() -> Result<()> {
             match action {
                 HostAction::RequestRestore {
                     snapshot,
+                    session,
                     workspace,
                     file,
                 } => {
                     let workspace = config.validate_workspace(&workspace)?;
+                    let snapshot = restore_target(&repo, snapshot, session)?;
                     let request = host.request_restore(
                         &repo,
                         &consumed,
@@ -1007,16 +1076,22 @@ fn run() -> Result<()> {
         Command::List => print(repo.list()?),
         Command::Diff {
             snapshot,
+            session,
             workspace,
             file,
-        } => print(repo.plan(&snapshot, &workspace, file.as_deref())?),
+        } => {
+            let snapshot = restore_target(&repo, snapshot, session)?;
+            print(repo.plan(&snapshot, &workspace, file.as_deref())?)
+        }
         Command::Restore {
             snapshot,
+            session,
             workspace,
             file,
             confirm,
             allow_rebind_overwrite,
         } => {
+            let snapshot = restore_target(&repo, snapshot, session)?;
             let plan = repo.plan(&snapshot, &workspace, file.as_deref())?;
             print(&plan)?;
             match confirm {

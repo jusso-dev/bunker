@@ -5,14 +5,14 @@ Discovery targets Claude Code, Cursor, Codex, GitHub Copilot, and Kiro. Back up 
 | Agent | Workspace configuration to review | Home/global configuration to review |
 | --- | --- | --- |
 | Claude Code | `CLAUDE.md`, `.claude/`, `.mcp.json`, skills and hooks | `~/.claude/` and configured external skill roots |
-| Cursor | `.cursor/rules/`, `.cursor/mcp.json`, project settings | `~/.cursor/`, user-level settings and MCP references |
+| Cursor | `.cursor/rules/`, `.cursor/mcp.json`, `.cursor/environment.json` (background agents), project settings | `~/.cursor/`, user-level settings and MCP references |
 | Codex | `AGENTS.md`, `.codex/`, local skills | `~/.codex/config.toml`, skills, rules and configured references |
-| GitHub Copilot | `.github/copilot-instructions.md`, `.github/instructions/`, `.vscode/mcp.json` | Editor user settings and profile-specific files |
+| GitHub Copilot | `.github/copilot-instructions.md`, `.github/instructions/`, `.vscode/mcp.json` | Editor user settings, `Code/User/prompts/`, JetBrains `github-copilot/intellij/` MCP and global instructions, and profile-specific files |
 | Kiro | `.kiro/steering/`, `.kiro/settings/`, hooks and agent rules | `~/.kiro/` and user MCP settings |
 
 For each agent:
 
-1. Use a disposable workspace to confirm the adapter detects the intended configuration. Read warnings about missing or inaccessible files.
+1. Use a disposable workspace to confirm the adapter detects the intended configuration. `discover` groups each agent's items by type under `by_category`. Read warnings about missing or inaccessible files; unreadable (for example org-managed) settings appear in `excluded` with reason `unreadable`.
 2. Inspect exclusions and sanitizer output. Secret-bearing configurations may be sanitized or skipped; a snapshot is not a universal secret scanner. Keep credentials as vault/environment references.
 3. Snapshot the workspace with `--agent` set to its adapter name (`claude-code`, `cursor`, `codex`, `copilot`, or `kiro`) when manually labeling a backup.
 4. Review `list` and restore to a separate directory. Verify the expected rules, skills, hooks and MCP references are present without executing restored hooks.

@@ -19,7 +19,19 @@
     ".kiro/settings/mcp.json": "{\"mcpServers\":{\"fixture\":{\"env\":{\"TOKEN\":\"fake-kiro-credential\"}}}}",
     ".kiro/steering/principles.md": "Use small functions.\n",
     ".kiro/hooks/check.kiro": "{\"name\":\"fixture-hook\",\"when\":{\"type\":\"fileEdited\"}}",
-    ".kiro/specs/feature/requirements.md": "Fixture specification.\n"
+    ".kiro/specs/feature/requirements.md": "Fixture specification.\n",
+    ".cursor/hooks.json": "{\"version\":1,\"hooks\":{\"stop\":[{\"command\":\"./hooks/stop.sh\"}]}}",
+    ".cursor/skills/lint/SKILL.md": "Run the linter.\n",
+    ".cursor/agents/planner.md": "Plan the change.\n",
+    ".codex/agents/tester.toml": "name = \"tester\"\n",
+    ".codex/hooks/notify.sh": "echo turn complete\n",
+    ".codex/memory/notes.md": "Prefer small diffs.\n",
+    ".copilot/copilot-instructions.md": "Explain changes briefly.\n",
+    ".copilot/skills/triage/SKILL.md": "Triage the issue.\n",
+    ".copilot/agents/reviewer.agent.md": "Review pull requests.\n",
+    ".copilot/hooks/session.json": "{\"version\":1}",
+    ".kiro/agents/builder.json": "{\"name\":\"builder\"}",
+    ".kiro/skills/release/SKILL.md": "Prepare the release.\n"
   },
   "workspace": {
     "AGENTS.md": "Use workspace conventions.\n",
@@ -34,11 +46,19 @@
     ".github/agents/reviewer.agent.md": "Inspect tests.\n",
     ".vscode/mcp.json": "{\"servers\":{\"fixture\":{\"env\":{\"TOKEN\":\"vault://fixture/token\"}}}}",
     ".kiro/steering/project.md": "Use explicit types.\n",
-    ".kiro/specs/feature/design.md": "Fixture design.\n"
+    ".kiro/specs/feature/design.md": "Fixture design.\n",
+    ".cursor/environment.json": "{\"install\":\"npm install\",\"env\":{\"API_TOKEN\":\"fake-cursor-background-credential\"}}",
+    ".github/hooks/policy.json": "{\"version\":1}"
   },
   "editor": {
     "Cursor/User/settings.json": "{\"editor.fontSize\":14}",
     "Code/User/mcp.json": "{\"servers\":{\"fixture\":{\"headers\":{\"X-Api-Key\":\"fake-editor-credential\"}}}}",
-    "Kiro/User/settings.json": "{\"editor.fontSize\":14}"
+    "Kiro/User/settings.json": "{\"editor.fontSize\":14}",
+    "Code/User/prompts/plan.prompt.md": "Plan before editing.\n"
+  },
+  "jetbrains": {
+    "github-copilot/intellij/mcp.json": "{\"servers\":{\"fixture\":{\"env\":{\"TOKEN\":\"fake-jetbrains-credential\"}}}}",
+    "github-copilot/intellij/global-copilot-instructions.md": "Use descriptive names.\n",
+    "github-copilot/apps.json": "{\"fixture\":{\"oauth_token\":\"fake-jetbrains-oauth\"}}"
   }
 }
