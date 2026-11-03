@@ -7,6 +7,7 @@ pub mod crypto;
 pub mod host_runtime;
 pub mod host_service;
 pub mod host_storage;
+pub mod logging;
 pub mod mcp;
 pub mod policy;
 pub mod protected_replication;

@@ -14,6 +14,7 @@ Local policies are TOML files passed with `--policy PATH`. Generate the installe
 | `region` | absent | Optional label; does not enforce provider residency. |
 | `dr_repository` | absent | Setting a value is rejected because protected DR policy execution is not configured. Use explicit replication only with its documented limits. |
 | `restore_test_interval_seconds` | 86400 | Interval for standalone scheduled probes when `daemon --probe-config PATH` is configured. |
+| `missed_backup_seconds` | absent | Seconds since the last successful capture before recording a missed backup; 60–2592000 when set. When absent, uses interval plus maximum jitter plus 60 seconds. |
 | `mass_delete_threshold` | 20 | Threshold used for snapshot-to-snapshot deletion alerts. |
 
 The UI/API has a separate metadata policy contract. All fields below are required by its create/update schema; the host bridge validates its supported subset and fails closed for unsupported storage/residency modes.
@@ -33,7 +34,7 @@ The UI/API has a separate metadata policy contract. All fields below are require
 | `storage` | `local`, `s3`, `r2`, `azure`, `gdrive`, or `onedrive`. |
 | `storageRef`, `keyRef` | Non-secret reference labels, at most 100 characters each; never credential values. |
 | `massDeleteThreshold` | Integer 1–1000000. |
-| `missedBackupMinutes` | Integer 10–43200. |
+| `missedBackupMinutes` | Integer 10–43200. Honoured by the host scheduler as seconds since the last successful capture; a miss is stored durably and published as a deduplicated `backup-missed` alert. |
 | `restoreTestIntervalHours` | Integer 1–8760; authenticated host probe cadence. Unconfigured probes report `not_run`. |
 | `channels` | `["ui"]` or `["ui", "webhook"]`; webhook requires operator-provisioned destination and worker. |
 
@@ -52,3 +53,7 @@ external recovery-report custody and policy/credential binding. See
 [host storage](../host-storage.md) for supported combinations, fixed retention
 horizons and retry behavior. AU residency remains fail-closed; a region label is
 not a residency attestation.
+
+Both schedulers apply random jitter from zero through `jitter_seconds` to the interval. Host policy interval changes are applied on refetch without a restart; shorter intervals can make the next capture immediately due. Standalone missed backups are recorded in the repository audit, once per last-success window. Configure the missed-backup threshold above the normal interval plus jitter to avoid alerts during a healthy schedule.
+
+CLI and host-approved destructive restores take a `pre-restore` safety snapshot before overwriting current state; unchanged file-only plans skip it. Ordinary snapshot exclusions, sanitization and caps apply. See the [CLI reference](cli.md) for the reported safety snapshot ID.

@@ -130,6 +130,11 @@ pub trait RestoreRepository {
     fn request(&self, id: &str) -> Result<Value>;
     fn audit(&self, event: &str, detail: Value) -> Result<()>;
     fn execute(&self, plan: &RestorePlan, selection: Option<&str>) -> Result<()>;
+    /// Capture current destination state before a destructive restore; `None` when nothing
+    /// existing would be overwritten.
+    fn pre_restore_snapshot(&self, _plan: &RestorePlan) -> Result<Option<String>> {
+        Ok(None)
+    }
     fn execute_before(
         &self,
         plan: &RestorePlan,
@@ -194,6 +199,12 @@ impl RestoreRepository for Repository {
     }
     fn audit(&self, event: &str, detail: Value) -> Result<()> {
         self.audit(event, detail)
+    }
+    fn pre_restore_snapshot(&self, plan: &RestorePlan) -> Result<Option<String>> {
+        // Host restores carry no local policy file; default exclusions still omit secrets.
+        Ok(self
+            .pre_restore_snapshot(plan, &Policy::default())?
+            .map(|manifest| manifest.id))
     }
     fn execute(&self, plan: &RestorePlan, selection: Option<&str>) -> Result<()> {
         // Core re-plans and compares confirmation again, then uses capability-safe filesystem access.
@@ -482,7 +493,7 @@ impl<T: Transport> HostClient<T> {
         repo: &impl RestoreRepository,
         consumed: &ConsumedRequests,
         local_request_id: &str,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let saved: SavedRequest = serde_json::from_value(repo.request(local_request_id)?)
             .context("invalid encrypted bridge request")?;
         ensure!(
@@ -523,9 +534,12 @@ impl<T: Transport> HostClient<T> {
         // Claim is not sufficient if destination/manifest changed while HTTP was in flight.
         let result = (|| {
             self.validate_current(repo, &saved)?;
+            let safety = repo
+                .pre_restore_snapshot(&saved.frozen.plan)
+                .context("pre-restore safety snapshot failed; restore not started")?;
             repo.audit(
                 "remote_restore_execution_started",
-                json!({"request":saved.server_request,"diff_digest":saved.diff_digest}),
+                json!({"request":saved.server_request,"diff_digest":saved.diff_digest,"pre_restore_snapshot":safety}),
             )?;
             ensure!(
                 Utc::now() < claim.expires_at && Utc::now() < saved.expires_at,
@@ -535,7 +549,8 @@ impl<T: Transport> HostClient<T> {
                 &saved.frozen.plan,
                 saved.frozen.selection.as_deref(),
                 claim.expires_at.min(saved.expires_at),
-            )
+            )?;
+            Ok(safety)
         })();
         let status = if result.is_ok() {
             "succeeded"
@@ -551,7 +566,7 @@ impl<T: Transport> HostClient<T> {
             &format!("/restores/{}/complete", saved.server_request),
             &json!({"status":status,"diffDigest":saved.diff_digest}),
         );
-        result?;
+        let safety = result?;
         audit?;
         let completion = completion
             .context("restore executed once; completion delivery uncertain; do not re-execute")?;
@@ -559,7 +574,7 @@ impl<T: Transport> HostClient<T> {
             completion["id"] == saved.server_request.to_string() && completion["status"] == status,
             "restore executed once; completion acknowledgement mismatch; do not re-execute"
         );
-        Ok(())
+        Ok(safety)
     }
     fn validate_current(&self, repo: &impl RestoreRepository, saved: &SavedRequest) -> Result<()> {
         ensure!(
@@ -804,6 +819,7 @@ impl LocalBindings {
             retention_days: remote.retention_days,
             restore_test_interval_seconds: remote.restore_test_interval_hours * 3600,
             mass_delete_threshold: remote.mass_delete_threshold,
+            missed_backup_seconds: Some(remote.missed_backup_minutes * 60),
             ..Policy::default()
         };
         policy.validate()?;
@@ -1017,7 +1033,12 @@ impl<T: Transport> HostService<T> {
             Ok(results) => results,
             Err(error) => {
                 let report = self.client.publish_alert(&ObservedAlert {
-                    event_id: Uuid::new_v4(),
+                    event_id: failure_event_id(
+                        self.client.identity.host,
+                        remote.id,
+                        local.interval_seconds,
+                        crate::repository::now(),
+                    ),
                     kind: AlertKind::BackupFailed,
                     critical: true,
                     snapshot: None,
@@ -1062,6 +1083,15 @@ impl<T: Transport> HostService<T> {
         }
         Ok(report)
     }
+}
+/// Repeated failures for one host and policy within one interval-sized window share an event
+/// ID, so retries raise the existing alert's occurrence count instead of new alerts.
+pub fn failure_event_id(host: Uuid, policy: Uuid, interval_seconds: u64, at: u64) -> Uuid {
+    let window = at / interval_seconds.max(1);
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("bunker:backup_failed:{host}:{policy}:{interval_seconds}:{window}").as_bytes(),
+    )
 }
 impl<T: Transport> HostClient<T> {
     pub fn publish_alert(&mut self, alert: &ObservedAlert) -> Result<()> {
@@ -1194,6 +1224,10 @@ impl ProductionHost {
         self.refresh()?;
         self.service.session_cycle(repo, bindings, work)
     }
+    pub(crate) fn publish_alert(&mut self, alert: &ObservedAlert) -> Result<()> {
+        self.refresh()?;
+        self.service.client.publish_alert(alert)
+    }
     pub fn request_restore(
         &mut self,
         repo: &Repository,
@@ -1218,7 +1252,7 @@ impl ProductionHost {
         repo: &Repository,
         consumed: &ConsumedRequests,
         local_request_id: &str,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         self.refresh()?;
         // Refuse requests prepared by a different integration with a destination around credentials.
         let saved: SavedRequest = serde_json::from_value(repo.request(local_request_id)?)?;

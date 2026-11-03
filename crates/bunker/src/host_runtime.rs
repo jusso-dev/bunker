@@ -168,6 +168,13 @@ struct Schedule {
     sessions: Vec<PendingSession>,
     #[serde(default)]
     session_receipts: Vec<SessionReceipt>,
+    #[serde(default)]
+    last_success: u64,
+    /// Interval that computed `next_run`; a refetched policy change reschedules.
+    #[serde(default)]
+    interval_seconds: u64,
+    #[serde(default)]
+    missed_backup_for: Option<u64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -216,6 +223,7 @@ struct RuntimeDiagnostic {
 }
 const MAX_OUTBOX: usize = 256;
 const MAX_ALERTS: usize = 512;
+const MAX_DETECTIONS: usize = 5;
 const MAX_DIAGNOSTICS: usize = 64;
 const MAX_EVIDENCE_OUTBOX: usize = 16;
 const STATE: &str = "host/schedule";
@@ -481,7 +489,7 @@ fn attempt_setup(
     save_schedule(repo, state)
 }
 fn finish_detection(repo: &Repository, state: &mut Schedule) -> Result<()> {
-    if state.pending_alerts.len() > MAX_ALERTS - 4 {
+    if state.pending_alerts.len() > MAX_ALERTS - MAX_DETECTIONS {
         return Ok(());
     }
     if let Some(pending) = &state.pending_detection {
@@ -515,9 +523,26 @@ fn scheduled_work(
     policy.validate()?;
     let setup_agent = agent_id(agent)?;
     finish_detection(repo, state)?;
+    let mut changed = apply_interval(state, policy);
+    if crate::scheduler::missed_backup_due(state.last_success, state.missed_backup_for, policy)
+        && state.pending_alerts.len() < MAX_ALERTS
+    {
+        state.missed_backup_for = Some(state.last_success);
+        state.pending_alerts.push(missed_alert(state));
+        crate::logging::warn(
+            "backup missed",
+            serde_json::json!({"event":"backup_missed","last_success":state.last_success,"threshold_seconds":policy.missed_backup_after()}),
+        );
+        changed = true;
+    }
+    if changed {
+        save_schedule(repo, state)?;
+    }
     let reconciled = reconcile_session_captures(repo, state)?;
     if state.pending_detection.is_none() && reconciled && now() >= state.next_run {
-        if state.pending.len() >= MAX_OUTBOX || state.pending_alerts.len() > MAX_ALERTS - 4 {
+        if state.pending.len() >= MAX_OUTBOX
+            || state.pending_alerts.len() > MAX_ALERTS - MAX_DETECTIONS
+        {
             // Backpressure is explicit and preserves every pending delivery. It
             // pauses new capture only after bounded capacity is exhausted; the
             // existing outbox is still returned so successful delivery can drain it.
@@ -538,7 +563,9 @@ fn scheduled_work(
                 "host-schedule",
                 baseline.as_ref(),
             )?;
-            state.next_run = now().saturating_add(policy.interval_seconds);
+            state.last_success = now();
+            state.next_run = crate::scheduler::next_due(state.last_success, policy);
+            state.interval_seconds = policy.interval_seconds;
             state.last_snapshot = Some(snapshot.id.clone());
             state.pending.push(snapshot.id.clone());
             if let Some(previous_setup) = state.pending_setup.take() {
@@ -564,6 +591,41 @@ fn scheduled_work(
     Ok(outbox(state))
 }
 
+/// A shorter refetched interval must not wait out the previously computed due time.
+fn apply_interval(state: &mut Schedule, policy: &Policy) -> bool {
+    if state.interval_seconds == policy.interval_seconds {
+        return false;
+    }
+    state.next_run = if state.last_success > 0 {
+        crate::scheduler::next_due(state.last_success, policy)
+    } else {
+        state
+            .next_run
+            .min(crate::scheduler::next_due(now(), policy))
+    };
+    state.interval_seconds = policy.interval_seconds;
+    true
+}
+/// One alert per missed window: the fingerprint, and so the event ID, depends only on the
+/// host and the last success, so retries and restarts deduplicate.
+fn missed_alert(state: &Schedule) -> crate::scheduler::Alert {
+    crate::scheduler::Alert {
+        kind: "backup_missed".into(),
+        fingerprint: blake3::hash(
+            format!(
+                "{}:backup_missed:{}",
+                state.host.unwrap_or_default(),
+                state.last_success
+            )
+            .as_bytes(),
+        )
+        .to_hex()
+        .to_string(),
+        detected_at: now(),
+        snapshot: None,
+        count: 1,
+    }
+}
 fn outbox(state: &Schedule) -> WorkResults {
     let alerts = state
         .pending_alerts
@@ -574,6 +636,8 @@ fn outbox(state: &Schedule) -> WorkResults {
                 "mass_delete" => AlertKind::MassDelete,
                 "history_rewrite" => AlertKind::HistoryRewrite,
                 "force_push" => AlertKind::ForcePush,
+                "skill_changed" => AlertKind::SkillChange,
+                "backup_missed" => AlertKind::BackupMissed,
                 _ => AlertKind::McpChange,
             },
             critical: alert.kind == "mass_delete",
@@ -586,6 +650,18 @@ fn outbox(state: &Schedule) -> WorkResults {
         alerts,
         evidence: state.pending_evidence.clone(),
     }
+}
+fn publish_missed_alerts(
+    state: &Schedule,
+    mut publish: impl FnMut(&ObservedAlert) -> Result<()>,
+) -> Result<()> {
+    for alert in outbox(state).alerts {
+        if matches!(alert.kind, AlertKind::BackupMissed) {
+            publish(&alert)?;
+        }
+    }
+    // Keep the durable outbox until the entire cycle succeeds; repeated sends deduplicate.
+    Ok(())
 }
 
 fn skipped_probe(
@@ -767,7 +843,7 @@ fn reconcile_session_captures(repo: &Repository, state: &mut Schedule) -> Result
         if let Some(snapshot) = published_session(repo, &state.sessions[index])? {
             if state.pending.len() >= MAX_OUTBOX
                 || state.pending_detection.is_some()
-                || state.pending_alerts.len() > MAX_ALERTS - 4
+                || state.pending_alerts.len() > MAX_ALERTS - MAX_DETECTIONS
             {
                 return Ok(false);
             }
@@ -805,7 +881,7 @@ fn capture_host_session(
         "session comparison backpressure"
     );
     ensure!(
-        state.pending_alerts.len() <= MAX_ALERTS - 4,
+        state.pending_alerts.len() <= MAX_ALERTS - MAX_DETECTIONS,
         "session alert outbox is full"
     );
     if session.workspace_snapshot.is_none() {
@@ -1030,8 +1106,18 @@ pub fn run(
     config.validate_storage_paths(repo_path, workspace)?;
     let (mut host, _) = config.open()?;
     let workspace = config.validate_workspace(workspace)?;
+    let _daemon_lock = crate::scheduler::daemon_lock(&repo_path.canonicalize()?)?;
+    let status = HostStatus::serve(repo_path, host.identity().host)?;
+    crate::logging::info(
+        "daemon started",
+        serde_json::json!({"event":"daemon_started","mode":"host","once":once,"pid":std::process::id()}),
+    );
     let mut failures = 0u32;
-    loop {
+    while !crate::scheduler::shutdown_requested() {
+        crate::logging::debug(
+            "host cycle",
+            serde_json::json!({"event":"host_cycle","failures":failures}),
+        );
         let result = (|| -> Result<_> {
             let repo = Repository::open_with_key_source(repo_path, key)?;
             let bindings = config.bindings(&repo, &workspace)?;
@@ -1056,7 +1142,11 @@ pub fn run(
                 })?;
                 work.evidence = state.pending_evidence.clone();
                 Ok(work)
-            })?;
+            });
+            if report.is_err() {
+                let _ = publish_missed_alerts(&state, |alert| host.publish_alert(alert));
+            }
+            let report = report?;
             state.pending.clear();
             state.pending_alerts.clear();
             state.pending_evidence.clear();
@@ -1069,22 +1159,73 @@ pub fn run(
         match result {
             Ok(report) => {
                 failures = 0;
+                status.update(failures, Some(&report), now().saturating_add(30));
                 println!("{report}");
             }
             Err(error) if once => return Err(error),
             Err(_) => {
                 failures = failures.saturating_add(1);
-                eprintln!("{{\"event\":\"host_cycle_failed\",\"retry\":true}}");
+                crate::logging::warn(
+                    "host cycle failed; retrying",
+                    serde_json::json!({"event":"host_cycle_failed","retry":true,"failures":failures}),
+                );
             }
         }
         if once {
-            return Ok(());
+            break;
         }
-        std::thread::sleep(Duration::from_secs(
-            30u64
-                .saturating_mul(2u64.saturating_pow(failures.min(7)))
-                .min(3600),
-        ));
+        let delay = 30u64
+            .saturating_mul(2u64.saturating_pow(failures.min(7)))
+            .min(3600);
+        if failures > 0 {
+            status.update(failures, None, now().saturating_add(delay));
+        }
+        crate::scheduler::sleep_unless_shutdown(Duration::from_secs(delay));
+    }
+    crate::scheduler::stopped(&repo_path.canonicalize()?);
+    Ok(())
+}
+
+/// Answers `bunker status` for the host runtime with bounded metadata only: no paths,
+/// policy contents or errors. Served from a thread so long cycle sleeps stay responsive.
+struct HostStatus {
+    #[cfg(unix)]
+    current: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    host: Uuid,
+}
+impl HostStatus {
+    fn serve(repo_path: &Path, host: Uuid) -> Result<Self> {
+        let status = Self {
+            #[cfg(unix)]
+            current: Default::default(),
+            host,
+        };
+        status.update(0, None, now());
+        #[cfg(unix)]
+        {
+            let listener = crate::scheduler::bind_status_socket(&repo_path.canonicalize()?)?;
+            listener.set_nonblocking(false)?;
+            let current = status.current.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let bytes = current.lock().map(|b| b.clone()).unwrap_or_default();
+                    crate::scheduler::send_status(stream, &bytes);
+                }
+            });
+        }
+        #[cfg(not(unix))]
+        let _ = repo_path;
+        Ok(status)
+    }
+    fn update(&self, failures: u32, report: Option<&serde_json::Value>, next_cycle_at: u64) {
+        let value = serde_json::json!({"running":true,"mode":"host","pid":std::process::id(),"host":self.host,
+            "state":{"consecutive_failures":failures,"last_report":report,"next_cycle_at":next_cycle_at}});
+        #[cfg(unix)]
+        if let (Ok(bytes), Ok(mut current)) = (serde_json::to_vec(&value), self.current.lock()) {
+            *current = bytes;
+        }
+        #[cfg(not(unix))]
+        let _ = value;
     }
 }
 
@@ -1924,5 +2065,255 @@ mod session_tests {
             Some(&periodic.snapshots[1])
         );
         assert_eq!(repo.list().unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod schedule_policy_tests {
+    use super::*;
+    use crate::host_service::AlertKind;
+
+    fn fixture() -> (tempfile::TempDir, PathBuf, Repository, Schedule) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("file"), b"fixture").unwrap();
+        let repo = Repository::init(&root.join("repo"), "host-policy-fixture").unwrap();
+        let state = load_schedule(&repo, &workspace, Uuid::from_u128(5)).unwrap();
+        (temp, workspace, repo, state)
+    }
+    fn policy(interval_seconds: u64, jitter_seconds: u64) -> Policy {
+        Policy {
+            interval_seconds,
+            jitter_seconds,
+            ..Policy::default()
+        }
+    }
+
+    #[test]
+    fn refetched_shorter_interval_takes_effect_without_waiting_out_old_schedule() {
+        let (_temp, workspace, repo, mut state) = fixture();
+        let hourly = policy(3600, 0);
+        let first = scheduled_work(&repo, &workspace, "codex", &hourly, &mut state, None).unwrap();
+        assert_eq!(first.snapshots.len(), 1);
+        assert_eq!(state.next_run, state.last_success + 3600);
+        state.pending.clear();
+        // Captured 1000 seconds ago under the hourly policy.
+        state.last_success -= 1000;
+        state.next_run -= 1000;
+        let ten_minutes = policy(600, 0);
+        let work =
+            scheduled_work(&repo, &workspace, "codex", &ten_minutes, &mut state, None).unwrap();
+        assert_eq!(work.snapshots.len(), 1, "shorter interval did not apply");
+        assert_eq!(state.interval_seconds, 600);
+        assert_eq!(state.next_run, state.last_success + 600);
+        state.pending.clear();
+        let daily = policy(86400, 0);
+        let work = scheduled_work(&repo, &workspace, "codex", &daily, &mut state, None).unwrap();
+        assert!(work.snapshots.is_empty());
+        assert_eq!(state.next_run, state.last_success + 86400);
+        let saved = load_schedule(&repo, &workspace, Uuid::from_u128(5)).unwrap();
+        assert_eq!(saved.interval_seconds, 86400);
+        assert_eq!(saved.next_run, state.next_run);
+    }
+
+    #[test]
+    fn host_schedule_applies_policy_jitter() {
+        let (_temp, workspace, repo, mut state) = fixture();
+        let jittered = policy(600, 120);
+        scheduled_work(&repo, &workspace, "codex", &jittered, &mut state, None).unwrap();
+        assert!((state.last_success + 600..=state.last_success + 720).contains(&state.next_run));
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            state.interval_seconds = 0;
+            apply_interval(&mut state, &jittered);
+            assert!((state.last_success + 600..=state.last_success + 720).contains(&state.next_run));
+            seen.insert(state.next_run);
+        }
+        assert!(seen.len() > 1, "host schedule ignored jitter");
+    }
+
+    #[test]
+    fn missed_backup_alert_uses_policy_threshold_and_deterministic_id() {
+        let (_temp, workspace, repo, mut state) = fixture();
+        let policy = Policy {
+            missed_backup_seconds: Some(1800),
+            ..policy(600, 0)
+        };
+        state.interval_seconds = 600;
+        state.last_snapshot = None;
+        state.last_success = now() - 1000;
+        state.next_run = now() + 3600;
+        let work = scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).unwrap();
+        assert!(work.alerts.is_empty(), "alerted before missedBackupMinutes");
+        let last = now() - 2000;
+        state.last_success = last;
+        let work = scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).unwrap();
+        assert_eq!(work.alerts.len(), 1);
+        assert!(matches!(work.alerts[0].kind, AlertKind::BackupMissed));
+        assert!(!work.alerts[0].critical);
+        let id = work.alerts[0].event_id;
+        assert_eq!(id.get_version_num(), 5);
+        // Undelivered retry after restart republishes the same event, not a new alert.
+        let mut state = load_schedule(&repo, &workspace, Uuid::from_u128(5)).unwrap();
+        let retry = scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).unwrap();
+        assert_eq!(retry.alerts.len(), 1);
+        assert_eq!(retry.alerts[0].event_id, id);
+        state.pending_alerts.clear();
+        let delivered =
+            scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).unwrap();
+        assert!(delivered.alerts.is_empty(), "same window alerted twice");
+        let mut other = Schedule {
+            host: Some(Uuid::from_u128(5)),
+            last_success: last,
+            ..Schedule::default()
+        };
+        assert_eq!(
+            Uuid::new_v5(
+                &Uuid::NAMESPACE_OID,
+                missed_alert(&other).fingerprint.as_bytes()
+            ),
+            id
+        );
+        other.last_success += 1;
+        assert_ne!(
+            Uuid::new_v5(
+                &Uuid::NAMESPACE_OID,
+                missed_alert(&other).fingerprint.as_bytes()
+            ),
+            id
+        );
+    }
+
+    #[test]
+    fn missed_alert_is_delivered_even_when_capture_keeps_failing() {
+        let (_temp, workspace, repo, mut state) = fixture();
+        let policy = Policy {
+            missed_backup_seconds: Some(600),
+            size_cap_bytes: 1,
+            max_file_bytes: 1,
+            ..policy(600, 0)
+        };
+        state.last_success = now() - 1000;
+        state.interval_seconds = 600;
+        state.next_run = 0;
+        // Two eligible files exceed the policy cap without being skipped as oversized files.
+        fs::write(workspace.join("a"), "a").unwrap();
+        fs::write(workspace.join("b"), "b").unwrap();
+        assert!(scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).is_err());
+        let mut delivered = vec![];
+        publish_missed_alerts(&state, |alert| {
+            assert!(matches!(alert.kind, AlertKind::BackupMissed));
+            delivered.push(alert.event_id);
+            Ok(())
+        })
+        .unwrap();
+        let state = load_schedule(&repo, &workspace, state.host.unwrap()).unwrap();
+        publish_missed_alerts(&state, |alert| {
+            delivered.push(alert.event_id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0], delivered[1]);
+        assert_eq!(state.pending_alerts.len(), 1);
+    }
+
+    #[test]
+    fn mcp_and_skill_detections_map_to_distinct_host_alerts() {
+        let state = Schedule {
+            pending_alerts: ["mcp_config_changed", "skill_changed"]
+                .into_iter()
+                .map(|kind| crate::scheduler::Alert {
+                    kind: kind.into(),
+                    fingerprint: kind.into(),
+                    detected_at: now(),
+                    snapshot: None,
+                    count: 1,
+                })
+                .collect(),
+            ..Schedule::default()
+        };
+        let results = outbox(&state);
+        assert!(matches!(results.alerts[0].kind, AlertKind::McpChange));
+        assert!(matches!(results.alerts[1].kind, AlertKind::SkillChange));
+    }
+
+    #[test]
+    fn repeated_backup_failures_share_one_alert_event_per_window() {
+        use crate::control_plane::{Method, Transport, TransportError};
+        use crate::host_service::{failure_event_id, HostClient, HostIdentity, HostService};
+        use serde_json::{json, Value};
+        struct Server {
+            host: Uuid,
+            alerts: Vec<Value>,
+        }
+        impl Transport for Server {
+            fn request(
+                &mut self,
+                _method: Method,
+                path: &str,
+                body: Option<&Value>,
+            ) -> std::result::Result<Value, TransportError> {
+                if path.ends_with("/policies") {
+                    return Ok(json!([{"id":Uuid::from_u128(9),"version":1,"body":{
+                        "name":"Fixture","hostId":self.host,"intervalMinutes":60,
+                        "endOfSession":true,"retentionDays":30,"exclusions":[],
+                        "sizeCapBytes":10000000,"immutable":false,"drCopy":false,
+                        "residency":"unrestricted","storage":"local","storageRef":"local",
+                        "keyRef":"key","massDeleteThreshold":20,"missedBackupMinutes":90,
+                        "restoreTestIntervalHours":24,"channels":["ui"]}}]));
+                }
+                if path.ends_with("/alerts") {
+                    self.alerts.push(body.unwrap().clone());
+                    return Ok(json!({"id": Uuid::from_u128(77)}));
+                }
+                panic!("unexpected host request");
+            }
+        }
+        let (_temp, _workspace, repo, state) = fixture();
+        let identity = HostIdentity::new(Uuid::new_v4(), state.host.unwrap()).unwrap();
+        let mut service = HostService::new(HostClient::new(
+            Server {
+                host: identity.host,
+                alerts: vec![],
+            },
+            identity,
+        ));
+        let bindings = LocalBindings::local_repository(&repo, "local", "key")
+            .unwrap()
+            .with_session_handler(true);
+        for _ in 0..2 {
+            assert!(service
+                .session_cycle(&repo, &bindings, |policy| {
+                    assert_eq!(policy.missed_backup_seconds, Some(5400));
+                    anyhow::bail!("fixture capture failure")
+                })
+                .is_err());
+        }
+        let alerts = &service.client.transport_mut().alerts;
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0]["type"], "backup-failed");
+        assert_eq!(alerts[0]["eventId"], alerts[1]["eventId"]);
+        let at = now();
+        let id = failure_event_id(identity.host, Uuid::from_u128(9), 3600, at);
+        let window = at - at % 3600;
+        assert_eq!(
+            id,
+            failure_event_id(identity.host, Uuid::from_u128(9), 3600, window + 3599)
+        );
+        assert_ne!(
+            id,
+            failure_event_id(identity.host, Uuid::from_u128(9), 3600, window + 3600)
+        );
+        assert_ne!(
+            id,
+            failure_event_id(Uuid::new_v4(), Uuid::from_u128(9), 3600, at)
+        );
+        assert_ne!(
+            id,
+            failure_event_id(identity.host, Uuid::from_u128(10), 3600, at)
+        );
     }
 }
