@@ -50,7 +50,8 @@ fn encrypted_deduplicated_snapshot_and_reviewed_restore() {
     for entry in walkdir::WalkDir::new(repository.root())
         .into_iter()
         .flatten()
-        .filter(|e| e.file_type().is_file())
+        // Windows holds the content-free lock file exclusively while open.
+        .filter(|e| e.file_type().is_file() && e.file_name() != "lock")
     {
         let data = fs::read(entry.path()).unwrap();
         assert!(!data

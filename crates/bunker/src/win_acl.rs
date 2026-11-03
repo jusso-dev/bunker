@@ -590,8 +590,8 @@ mod tests {
             None,
         );
         assert!(check_path(&dir, true).is_err());
-        let trusted = Trusted::current().unwrap();
-        set_protected_dacl(&dir, &[&trusted.user, &trusted.system]);
+        // No cleanup: the inherit-only ACL removed this user's effective access,
+        // so restoring it can be denied; the temporary directory is disposable.
     }
 
     #[test]
@@ -606,12 +606,15 @@ mod tests {
             WRITE_DAC,
             WRITE_OWNER,
             GENERIC_ALL,
-            GENERIC_WRITE,
         ] {
             custom_acl(&ancestor, 0, Some((&everyone, mask, 0)));
             let error = check_ancestors(&ancestor.join("state")).unwrap_err();
             assert!(error.to_string().contains("replacement or ACL control"));
         }
+        // Windows maps GENERIC_WRITE on a directory to add-file/add-subdirectory
+        // rights, which cannot delete, rename or re-ACL it.
+        custom_acl(&ancestor, 0, Some((&everyone, GENERIC_WRITE, 0)));
+        check_ancestors(&ancestor.join("state")).unwrap();
     }
 
     #[test]

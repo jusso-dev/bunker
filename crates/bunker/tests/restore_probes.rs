@@ -1,3 +1,5 @@
+// Container restore probes are Unix-only (docs/restore-probes.md).
+#![cfg(unix)]
 use bunker::{host_service, repository, restore_probes};
 use host_service::{ProbeFailure, ProbeOutcome, ProbeSkip};
 use restore_probes::*;
