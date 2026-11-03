@@ -15,10 +15,11 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    process::Command,
+    time::Duration,
 };
+#[cfg(unix)]
+use std::{process::Stdio, thread, time::Instant};
 use uuid::Uuid;
 
 const MAX_CONFIG: u64 = 64 * 1024;
@@ -690,6 +691,7 @@ fn validate_mcp_frames(bytes: &[u8]) -> std::result::Result<bool, ProbeFailure> 
     Ok(initialized)
 }
 
+#[cfg_attr(not(unix), allow(dead_code))] // Only Unix runs probe processes.
 enum ProcessResult {
     Exited(bool, Vec<u8>),
     Validated,
@@ -812,6 +814,7 @@ fn bounded_process(
 ) -> ProcessResult {
     ProcessResult::Unavailable
 }
+#[cfg(unix)]
 fn kill_reap(child: &mut std::process::Child) {
     #[cfg(unix)]
     unsafe {

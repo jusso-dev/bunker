@@ -10,7 +10,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -257,7 +257,7 @@ fn destination_identity(path: &Path) -> Result<DestinationIdentity> {
             path.canonicalize()? == path,
             "restore destination must remain canonical"
         );
-        let meta = fs::symlink_metadata(path)?;
+        let meta = std::fs::symlink_metadata(path)?;
         ensure!(
             meta.is_dir() && !meta.file_type().is_symlink(),
             "restore destination changed"

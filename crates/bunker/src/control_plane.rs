@@ -14,7 +14,7 @@ use reqwest::{blocking::Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     time::Duration,
@@ -568,12 +568,12 @@ pub(crate) fn private_directory(path: &Path) -> Result<PathBuf> {
     {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt};
         let absolute = std::path::absolute(path)?;
-        match fs::DirBuilder::new().mode(0o700).create(&absolute) {
+        match std::fs::DirBuilder::new().mode(0o700).create(&absolute) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e.into()),
         }
-        let metadata = fs::symlink_metadata(path)?;
+        let metadata = std::fs::symlink_metadata(path)?;
         ensure!(
             metadata.is_dir()
                 && !metadata.file_type().is_symlink()
@@ -604,7 +604,7 @@ pub(crate) fn read_private(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let file = OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             // Open first without following links, but do not block on a FIFO/device
             // before we can inspect the descriptor and reject non-regular files.

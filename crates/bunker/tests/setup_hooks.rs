@@ -9,6 +9,9 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+};
+#[cfg(unix)]
+use std::{
     process::Command,
     sync::atomic::{AtomicBool, Ordering},
 };
