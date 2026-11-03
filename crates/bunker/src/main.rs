@@ -22,6 +22,9 @@ struct Cli {
     /// Explicit AWS KMS, Azure Key Vault or GCP KMS provider configuration.
     #[arg(long, global = true)]
     key_config: Option<PathBuf>,
+    /// Diagnostic level for JSON stderr logs: error, warn, info or debug. Overrides BUNKER_LOG.
+    #[arg(long, global = true)]
+    log_level: Option<bunker::logging::Level>,
     #[command(subcommand)]
     command: Command,
 }
@@ -412,8 +415,22 @@ impl std::fmt::Display for SessionExit {
     }
 }
 impl std::error::Error for SessionExit {}
+fn log_level(flag: Option<bunker::logging::Level>) -> Result<bunker::logging::Level> {
+    if let Some(level) = flag {
+        return Ok(level);
+    }
+    match std::env::var("BUNKER_LOG") {
+        Err(std::env::VarError::NotPresent) => Ok(bunker::logging::Level::Info),
+        Ok(value) if value.is_empty() => Ok(bunker::logging::Level::Info),
+        Ok(value) => value
+            .parse()
+            .map_err(|error: String| anyhow::anyhow!("BUNKER_LOG: {error}")),
+        Err(_) => anyhow::bail!("BUNKER_LOG: invalid log level; expected error, warn, info or debug"),
+    }
+}
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    bunker::logging::set_level(log_level(cli.log_level)?);
     if let Command::ConsumerRebind {
         storage,
         consumer_state,
@@ -622,6 +639,16 @@ fn run() -> Result<()> {
         return print(
             serde_json::json!({"verified_snapshots":count,"inventory_completeness":if *legacy_unindexed {"unproven_legacy_listing"} else {"authenticated_inventory_pinned_by_saved_locator"},"selected_snapshot":snapshot,"escrow_unlock_required":matches!(key_source,KeySource::Escrow{..})}),
         );
+    }
+    if matches!(
+        cli.command,
+        Command::Daemon { once: false, .. }
+            | Command::Host {
+                action: HostAction::Run { once: false, .. },
+                ..
+            }
+    ) {
+        ctrlc::set_handler(scheduler::request_shutdown)?;
     }
     if let Command::Host {
         config,
@@ -839,8 +866,10 @@ fn run() -> Result<()> {
                 }
                 HostAction::ReviewRestore { id } => print(host.local_restore_preview(&repo, &id)?),
                 HostAction::ExecuteRestore { id } => {
-                    host.execute_restore_once(&repo, &consumed, &id)?;
-                    print(serde_json::json!({"restored_once":true}))
+                    let safety = host.execute_restore_once(&repo, &consumed, &id)?;
+                    print(
+                        serde_json::json!({"restored_once":true,"pre_restore_snapshot":safety}),
+                    )
                 }
                 HostAction::Enroll { .. } | HostAction::Run { .. } => unreachable!(),
             }
@@ -993,6 +1022,15 @@ fn run() -> Result<()> {
             print(&plan)?;
             match confirm {
                 Some(token) => {
+                    // Undo point for the restore itself; only after the reviewed plan matches.
+                    anyhow::ensure!(
+                        token == plan.confirmation,
+                        "restore confirmation missing or stale; review fresh diff"
+                    );
+                    let safety = repo
+                        .pre_restore_snapshot(&plan, &Policy::load(cli.policy.as_deref())?)
+                        .context("pre-restore safety snapshot failed; restore not started")?
+                        .map(|manifest| manifest.id);
                     repo.restore_with_options(
                         &snapshot,
                         &workspace,
@@ -1000,7 +1038,7 @@ fn run() -> Result<()> {
                         &token,
                         allow_rebind_overwrite,
                     )?;
-                    print(serde_json::json!({"restored":true}))
+                    print(serde_json::json!({"restored":true,"pre_restore_snapshot":safety}))
                 }
                 None => {
                     eprintln!("Review this diff, then repeat with --confirm <confirmation>.");
@@ -1220,10 +1258,7 @@ fn main() {
         if let Some(exit) = error.downcast_ref::<SessionExit>() {
             std::process::exit(exit.0);
         }
-        eprintln!(
-            "{}",
-            serde_json::json!({"level":"error","message":error.to_string()})
-        );
+        bunker::logging::error(&error.to_string(), serde_json::Value::Null);
         std::process::exit(1);
     }
 }

@@ -709,10 +709,17 @@ fn metadata_only_encrypted_plan_one_shot_claim_completion_and_restart_replay() {
     assert!(!String::from_utf8_lossy(&encrypted).contains("private content"));
     assert!(state.lock().unwrap().claim.is_none());
     assert_eq!(f.content(), "changed private content");
-    client
+    let safety = client
         .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
-        .unwrap();
+        .unwrap()
+        .expect("host-approved overwrite takes a pre-restore snapshot");
     assert_eq!(f.content(), "original private content");
+    let manifest = f.repo.manifest(&safety).unwrap();
+    assert_eq!(manifest.trigger, "pre-restore");
+    assert_eq!(
+        &*f.repo.file_bytes(&manifest.files[0]).unwrap(),
+        b"changed private content"
+    );
     let before = state.lock().unwrap().calls.len();
     let reopened = ConsumedRequests::open(f.consumed.path()).unwrap();
     // Put the destination back to its original before-state; replay still cannot claim or write.
@@ -1262,4 +1269,114 @@ fn policy_binding_detects_actual_key_header_change_before_scheduler_work() {
         .err()
         .unwrap();
     assert!(error.to_string().contains("binding changed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn host_runtime_answers_local_status_and_stops_cleanly() {
+    use std::{
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (ca_key, ca) = ca();
+    enrollment(&root, &ca_key, &ca, Issue::Good).unwrap();
+    let ca_file = root.join("server-ca.pem");
+    fs::write(&ca_file, ca.to_pem().unwrap()).unwrap();
+    let repo = root.join("repo");
+    Repository::init(&repo, "host-status-fixture").unwrap();
+    let work = root.join("work");
+    fs::create_dir(&work).unwrap();
+    fs::write(work.join("file"), "fixture").unwrap();
+    // Nothing listens here: every cycle fails and the runtime keeps retrying.
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let config = root.join("host.toml");
+    fs::write(
+        &config,
+        toml::to_string(&bunker::host_runtime::HostConfig {
+            public_origin: format!("https://localhost:{}", closed.port()),
+            host_origin: format!("https://localhost:{}", closed.port()),
+            tenant: identity().tenant,
+            credential_directory: root.join("credentials"),
+            consumed_directory: private_dir(&root, "consumed"),
+            server_ca_file: Some(ca_file),
+            storage_ref: "local-repository".into(),
+            key_ref: "wrapped-key".into(),
+            setup_home: None,
+            probe_config: None,
+            storage: None,
+            session_handler: false,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bunker"));
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .env("BUNKER_PASSPHRASE", "host-status-fixture");
+        command
+    };
+    let mut child = command()
+        .args(["host", "--config"])
+        .arg(&config)
+        .args(["run", "--workspace"])
+        .arg(&work)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut status = None;
+    while Instant::now() < deadline && child.try_wait().unwrap().is_none() {
+        let output = command().arg("status").output().unwrap();
+        if output.status.success() {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            if value["state"]["consecutive_failures"].as_u64() >= Some(1) {
+                status = Some(value);
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let Some(status) = status else {
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+        panic!(
+            "host status unavailable: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    assert_eq!(status["running"], true);
+    assert_eq!(status["mode"], "host");
+    assert_eq!(status["host"], identity().host.to_string());
+    assert!(status["state"]["next_cycle_at"].as_u64().unwrap() > 0);
+    let wire = status.to_string();
+    assert!(!wire.contains(root.to_str().unwrap()), "status leaked a path");
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let exit = loop {
+        if let Some(exit) = child.try_wait().unwrap() {
+            break exit;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("host runtime ignored SIGTERM");
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(exit.success(), "host runtime did not exit cleanly: {exit:?}");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.contains("\"event\":\"host_cycle_failed\""), "{stderr}");
+    assert!(stderr.contains("\"event\":\"daemon_stopped\""), "{stderr}");
+    assert!(!repo.join("daemon.sock").exists());
+    assert!(!command().arg("status").output().unwrap().status.success());
 }
