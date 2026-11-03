@@ -478,7 +478,25 @@ pub(crate) fn publish_recovery(source: &Path, destination: &Path) -> Result<()> 
     }
     #[cfg(target_os = "windows")]
     {
-        fs::rename(source, destination)?;
+        use std::os::windows::ffi::OsStrExt;
+        let source: Vec<u16> = source.as_os_str().encode_wide().collect();
+        let destination: Vec<u16> = destination.as_os_str().encode_wide().collect();
+        ensure!(
+            !source.contains(&0) && !destination.contains(&0),
+            "paths cannot contain NUL"
+        );
+        let source: Vec<u16> = source.into_iter().chain([0]).collect();
+        let destination: Vec<u16> = destination.into_iter().chain([0]).collect();
+        // MoveFileW fails if the destination exists, including an empty directory.
+        if unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileW(
+                source.as_ptr(),
+                destination.as_ptr(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
         Ok(())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]

@@ -216,6 +216,8 @@ fn atomic_write_inner(
         let mut file = dir.open_with(&temp, &options)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        // Windows cannot rename or unlink this file while its handle is open.
+        drop(file);
         if replace {
             dir.rename(&temp, dir, path)?;
         } else {
