@@ -175,7 +175,41 @@ fn evidence(backend: &ProtectedBackend) -> ProtectionEvidence {
                 blake3: blake3::hash(BYTES).to_hex().to_string(),
             },
         )]),
+        region: None,
     }
+}
+#[test]
+fn evidence_records_configured_region_without_requiring_it_for_old_reports() {
+    let (backend, _) = build(&config(false), successful_existing(false));
+    backend.create_verified(PATH, BYTES.to_vec()).unwrap();
+    let saved = backend.evidence().unwrap();
+    assert_eq!(saved.region.as_deref(), Some("us-east-1"));
+    let json = serde_json::to_value(&saved).unwrap();
+    assert_eq!(json["region"], "us-east-1");
+    // Reports written before region recording still load.
+    let mut old = json.clone();
+    old.as_object_mut().unwrap().remove("region");
+    let old: ProtectionEvidence = serde_json::from_value(old).unwrap();
+    assert_eq!(old.region, None);
+    let mut azure = config(true);
+    azure
+        .options
+        .insert("region".into(), "australiaeast".into());
+    let (backend, _) = build(&azure, successful_existing(true));
+    backend.create_verified(PATH, BYTES.to_vec()).unwrap();
+    assert_eq!(
+        backend.evidence().unwrap().region.as_deref(),
+        Some("australiaeast")
+    );
+    azure.options.insert("region".into(), "bad region".into());
+    assert!(ProtectedBackend::with_transport(
+        &azure,
+        until(),
+        Arc::new(Fixture::default()),
+        Arc::new(Fixed(now())),
+        credential,
+    )
+    .is_err());
 }
 
 #[test]

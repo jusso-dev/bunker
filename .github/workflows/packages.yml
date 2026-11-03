@@ -1,4 +1,4 @@
-name: Unsigned package candidates
+name: Attested package candidates
 on:
   workflow_dispatch:
 permissions:
@@ -39,9 +39,32 @@ jobs:
           subject-path: |
             dist/bunker-*.tar.gz
             dist/bunker-*.zip
+      - name: Locate the per-target SBOM
+        id: sbom
+        shell: bash
+        run: |
+          files=(dist/*.cdx.json)
+          [ "${#files[@]}" -eq 1 ]
+          echo "path=${files[0]}" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.4.0
+        with:
+          subject-path: |
+            dist/bunker-*.tar.gz
+            dist/bunker-*.zip
+          sbom-path: ${{ steps.sbom.outputs.path }}
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: v2.5.3
+      - name: Keyless signatures for archives and checksums
+        shell: bash
+        run: |
+          for file in dist/*.tar.gz dist/*.zip dist/*.sha256; do
+            [ -f "$file" ] || continue
+            cosign sign-blob --yes --bundle "$file.sigstore.json" "$file"
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: bunker-${{ matrix.target }}-unsigned
+          name: bunker-${{ matrix.target }}-attested
           path: dist/*
           if-no-files-found: error
   # Publishing, Apple notarisation, Authenticode/MSI signing and registry
