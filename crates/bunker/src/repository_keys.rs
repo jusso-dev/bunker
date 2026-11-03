@@ -287,6 +287,20 @@ impl Repository {
                 _lock: target_lock,
             });
         }
+        // Windows refuses to rename a directory holding open handles; publish
+        // closed, then relock and require the exact header that was staged.
+        #[cfg(windows)]
+        let (dir, lock) = {
+            drop((dir, lock));
+            crate::storage::publish_recovery(staging.path(), path)?;
+            let (_, dir, lock) = open_locked(path)?;
+            ensure!(
+                read_bounded(&dir, "repository.json", 8192)? == bytes,
+                "repository header changed during initialization"
+            );
+            (dir, lock)
+        };
+        #[cfg(not(windows))]
         crate::storage::publish_recovery(staging.path(), path)?;
         super::sync_ambient_dir(parent)?;
         let root = path.canonicalize()?;
