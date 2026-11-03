@@ -309,6 +309,8 @@ for (const [resource, response] of [
 }
 paths[`${base}/policies`].get.description =
   "Human lists use updated_at + id pagination. An authenticated host still receives only its single effective host override or tenant-default policy, without pagination.";
+paths[`${base}/policies`].post.description =
+  "Each save increments version. Hosts see the new version on their next poll. immutable and drCopy require s3 or azure storage (S3 Object Lock or Azure version immutability); other storage returns 400. drCopy requires immutable.";
 paths["/me"].get.description =
   "Tenants are bounded to 200 per page, ordered by tenant creation time and ID descending. Follow X-Next-Cursor to reach all memberships. localPassword indicates whether an existing local credential can be changed; it is not identity-provider reset authority.";
 for (const [resource, request, response] of [

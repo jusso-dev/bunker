@@ -1,7 +1,21 @@
 "use client";
 
 import { evidenceOutcome } from "../lib/evidence";
-import { ProbeResultBadge, RestoreProbeScope } from "./probe-result";
+import {
+  ProbeHistoryTable,
+  ProbeResultBadge,
+  RestoreProbeScope,
+} from "./probe-result";
+import {
+  alertSnapshot,
+  defaultAlertFilters,
+  filterAlerts,
+  onboardingSteps,
+  parseTimelineHref,
+  timelineHref,
+  type AlertFilters,
+  type TimelineLink,
+} from "../lib/console-state";
 import {
   useCallback,
   useEffect,
@@ -16,7 +30,12 @@ import {
 } from "./snapshot-comparison";
 import { Button } from "./ui/button";
 import { AccountSettings, RecoveryForm } from "./human-account";
-import type { Policy } from "@/lib/schemas";
+import {
+  alert as alertSchema,
+  lockCapableStorage,
+  storageProtectionError,
+  type Policy,
+} from "@/lib/schemas";
 import type { components } from "../lib/api.generated";
 type Tenant = components["schemas"]["meResponse"]["tenants"][number];
 type Host = components["schemas"]["hostRow"];
@@ -84,7 +103,8 @@ export function Console() {
     [data, setData] = useState<Data>(empty),
     [enrollmentToken, setEnrollmentToken] = useState(""),
     [filter, setFilter] = useState(""),
-    [alertFilter, setAlertFilter] = useState("open"),
+    [alertFilters, setAlertFilters] =
+      useState<AlertFilters>(defaultAlertFilters),
     [selected, setSelected] = useState<Restore | null>(null),
     [reviewed, setReviewed] = useState(false),
     [confirmedDigest, setConfirmedDigest] = useState(""),
@@ -112,6 +132,9 @@ export function Console() {
     };
   }, []);
   const sessionGeneration = useRef(0);
+  const openLinkRef = useRef<
+    (link: TimelineLink, available: Tenant[]) => Promise<void>
+  >(async () => {});
   const clearSession = useCallback(() => {
     sessionGeneration.current += 1;
     setSignedIn(false);
@@ -131,7 +154,7 @@ export function Console() {
     setConfirmedDigest("");
     setCompare([]);
     setFilter("");
-    setAlertFilter("open");
+    setAlertFilters(defaultAlertFilters);
     setSection("Timeline");
     setNotice("");
     setError("");
@@ -162,6 +185,7 @@ export function Console() {
       );
       setTransport(me.hostTransport);
       setSignedIn(true);
+      return me.tenants;
     } catch (e) {
       handleError(e);
     } finally {
@@ -180,6 +204,8 @@ export function Console() {
         setTenantId(me.tenants[0]?.id ?? "");
         setTransport(me.hostTransport);
         setSignedIn(true);
+        const link = parseTimelineHref(window.location.hash);
+        if (link) void openLinkRef.current(link, me.tenants);
       })
       .catch((e) => {
         if (active && generation === sessionGeneration.current) handleError(e);
@@ -269,6 +295,56 @@ export function Console() {
       clearInterval(timer);
     };
   }, [refresh, signedIn, tenantId, handleError, loadMe]);
+  function switchTenant(id: string) {
+    sessionGeneration.current += 1;
+    setTenantId(id);
+    setData(empty);
+    setCursors({});
+    pageCounts.current = {};
+    refreshVersion.current += 1;
+    setPinnedSnapshot(null);
+    setSelected(null);
+    setEnrollmentToken("");
+    setCompare([]);
+    setAlertFilters((f) => ({ ...f, host: "" }));
+    setNotice("");
+    setError("");
+  }
+  // Shareable timeline links (#timeline?tenant=…&snapshot=…) survive reloads.
+  async function openTimelineLink(link: TimelineLink, available: Tenant[]) {
+    setError("");
+    setNotice("");
+    if (!available.some((t) => t.id === link.tenantId)) {
+      setError("The linked snapshot belongs to a tenant you cannot access.");
+      return;
+    }
+    if (link.tenantId !== tenantId) switchTenant(link.tenantId);
+    setSection("Timeline");
+    setSelected(null);
+    const generation = sessionGeneration.current;
+    try {
+      const rows = await api<Snapshot[]>(
+        `tenants/${link.tenantId}/snapshots/${link.snapshotId}`,
+      );
+      if (generation !== sessionGeneration.current) return;
+      if (!rows[0]) throw new Error("Snapshot no longer available");
+      setPinnedSnapshot(rows[0]);
+      setFilter(rows[0].id);
+    } catch (e) {
+      if (generation === sessionGeneration.current) handleError(e);
+    }
+  }
+  useEffect(() => {
+    openLinkRef.current = openTimelineLink;
+  });
+  useEffect(() => {
+    const onPop = () => {
+      const link = parseTimelineHref(window.location.hash);
+      if (link) void openLinkRef.current(link, tenants);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [tenants]);
   async function run(fn: () => Promise<void>) {
     const generation = sessionGeneration.current;
     setBusy(true);
@@ -339,7 +415,9 @@ export function Console() {
                 email: f.get("email"),
                 password: f.get("password"),
               });
-              await loadMe();
+              const available = await loadMe();
+              const link = parseTimelineHref(window.location.hash);
+              if (link && available) await openLinkRef.current(link, available);
             });
           }}
         >
@@ -394,10 +472,11 @@ export function Console() {
         </p>
       </main>
     );
-  const visible = mergeRows(
+  const loadedSnapshots = mergeRows(
     data.snapshots,
     pinnedSnapshot ? [pinnedSnapshot] : [],
-  ).filter((s) =>
+  );
+  const visible = loadedSnapshots.filter((s) =>
     [s.id, s.host_id, s.body.agent, s.body.sessionId].some((v) =>
       v.includes(filter),
     ),
@@ -405,6 +484,8 @@ export function Console() {
   const passed = data.evidence.filter(
     (e) => evidenceOutcome(e.body) === "passed",
   ).length;
+  const steps = onboardingSteps(data);
+  const nextStep = steps.findIndex((step) => !step.done);
   return (
     <div className="shell">
       <aside>
@@ -416,20 +497,7 @@ export function Console() {
           <select
             disabled={busy}
             value={tenantId}
-            onChange={(e) => {
-              sessionGeneration.current += 1;
-              setTenantId(e.target.value);
-              setData(empty);
-              setCursors({});
-              pageCounts.current = {};
-              refreshVersion.current += 1;
-              setPinnedSnapshot(null);
-              setSelected(null);
-              setEnrollmentToken("");
-              setCompare([]);
-              setNotice("");
-              setError("");
-            }}
+            onChange={(e) => switchTenant(e.target.value)}
           >
             {tenants.map((t) => (
               <option key={t.id} value={t.id}>
@@ -474,6 +542,12 @@ export function Console() {
               key={item}
               aria-current={section === item ? "page" : undefined}
               onClick={() => {
+                if (parseTimelineHref(window.location.hash))
+                  window.history.replaceState(
+                    null,
+                    "",
+                    window.location.pathname + window.location.search,
+                  );
                 setSection(item);
                 setSelected(null);
                 setNotice("");
@@ -795,89 +869,115 @@ export function Console() {
           </>
         )}
         {section === "Onboarding" && (
-          <>
-            <section className="panel">
-              <p className="eyebrow">01 / Storage and keys</p>
-              <h2>Configure the host first</h2>
-              <p>
-                Set storage credentials and encryption keys on the host using
-                its local configuration. The control plane accepts reference
-                names only. Cloud connectivity, object lock, recovery escrow,
-                and residency must be validated separately on that host.
-              </p>
-              <Button variant="outline" onClick={() => setSection("Policies")}>
-                Set policy references
-              </Button>
-            </section>
-            <section className="panel">
-              <p className="eyebrow">02 / Enrollment</p>
-              <h2>Connect the first host</h2>
-              <p>
-                {transport === "development-loopback"
-                  ? "Development loopback enrollment is enabled. Tokens expire after 10 minutes and can be used once."
-                  : transport === "mtls"
-                    ? "One-time tokens expire after 10 minutes. Your host generates its own key and CSR and receives a certificate for the mTLS endpoint."
-                    : "Production gateway is not configured."}
-              </p>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const f = new FormData(e.currentTarget);
-                  void run(async () => {
-                    const generation = sessionGeneration.current;
-                    const result = await api<
-                      components["schemas"]["enrollmentResponse"]
-                    >(`tenants/${tenantId}/enrollments`, {
-                      name: f.get("name"),
-                    });
-                    if (generation !== sessionGeneration.current) return;
-                    setEnrollmentToken(result.token);
-                  });
-                }}
-              >
-                <label>
-                  Host name
-                  <input name="name" required maxLength={100} />
-                </label>
-                <Button
-                  disabled={
-                    busy ||
-                    !canEdit ||
-                    !["development-loopback", "mtls"].includes(transport)
-                  }
+          <section className="panel">
+            <h2>Setup checklist</h2>
+            <p className="muted">
+              {steps.filter((step) => step.done).length} of {steps.length}{" "}
+              complete. Steps follow live tenant data and refresh every 15
+              seconds. The control plane stores storage and key reference names
+              only; the host checks connectivity, object lock, escrow and
+              residency when it runs.
+            </p>
+            <ol className="checklist">
+              {steps.map((step, i) => (
+                <li
+                  key={step.id}
+                  aria-current={i === nextStep ? "step" : undefined}
                 >
-                  Create one-time token
-                </Button>
-              </form>
-              {enrollmentToken && (
-                <div className="secret">
-                  <p>
-                    Copy this into the local daemon enrollment prompt. It will
-                    not be shown again after leaving this tenant or signing out.
-                  </p>
-                  <code>{enrollmentToken}</code>
-                  <Button
-                    variant="outline"
-                    onClick={() => setEnrollmentToken("")}
-                  >
-                    Hide token
-                  </Button>
-                </div>
-              )}
-            </section>
-            <section className="panel">
-              <p className="eyebrow">03 / Verify</p>
-              <h2>Wait for your first backup</h2>
-              <p>
-                {data.snapshots.some((s) => s.body.status === "succeeded")
-                  ? "A host has reported a successful snapshot. Run a sandbox restore to validate recovery."
-                  : "No successful snapshot reported yet."}
-              </p>
-              <Button variant="outline" onClick={() => setSection("Timeline")}>
-                Open timeline
-              </Button>
-            </section>
-          </>
+                  <div className="step-heading">
+                    <strong>
+                      {i + 1}. {step.title}
+                    </strong>
+                    <span
+                      className={`badge ${step.done ? "succeeded" : "pending"}`}
+                    >
+                      {step.done ? "Done" : i === nextStep ? "Next" : "To do"}
+                    </span>
+                  </div>
+                  <p>{step.status}</p>
+                  <pre>
+                    <code>{step.commands.join("\n")}</code>
+                  </pre>
+                  {(step.id === "storage" || step.id === "keys") && (
+                    <Button
+                      variant="outline"
+                      onClick={() => setSection("Policies")}
+                    >
+                      Set policy references
+                    </Button>
+                  )}
+                  {step.id === "enrol" && (
+                    <>
+                      <p>
+                        {transport === "development-loopback"
+                          ? "Development loopback enrollment is enabled. Tokens expire after 10 minutes and can be used once."
+                          : transport === "mtls"
+                            ? "One-time tokens expire after 10 minutes. Your host generates its own key and CSR and receives a certificate for the mTLS endpoint."
+                            : "Production gateway is not configured."}
+                      </p>
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          const f = new FormData(e.currentTarget);
+                          void run(async () => {
+                            const generation = sessionGeneration.current;
+                            const result = await api<
+                              components["schemas"]["enrollmentResponse"]
+                            >(`tenants/${tenantId}/enrollments`, {
+                              name: f.get("name"),
+                            });
+                            if (generation !== sessionGeneration.current)
+                              return;
+                            setEnrollmentToken(result.token);
+                          });
+                        }}
+                      >
+                        <label>
+                          Host name
+                          <input name="name" required maxLength={100} />
+                        </label>
+                        <Button
+                          disabled={
+                            busy ||
+                            !canEdit ||
+                            !["development-loopback", "mtls"].includes(
+                              transport,
+                            )
+                          }
+                        >
+                          Create one-time token
+                        </Button>
+                      </form>
+                      {enrollmentToken && (
+                        <div className="secret">
+                          <p>
+                            Put this in BUNKER_ENROLLMENT_TOKEN on the host. It
+                            will not be shown again after leaving this tenant or
+                            signing out.
+                          </p>
+                          <code>{enrollmentToken}</code>
+                          <Button
+                            variant="outline"
+                            onClick={() => setEnrollmentToken("")}
+                          >
+                            Hide token
+                          </Button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {step.id === "backup" && (
+                    <Button
+                      variant="outline"
+                      onClick={() => setSection("Timeline")}
+                    >
+                      Open timeline
+                    </Button>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </section>
         )}
         {section === "Alerts" && (
           <>
@@ -885,36 +985,87 @@ export function Console() {
               <label>
                 Show
                 <select
-                  value={alertFilter}
-                  onChange={(e) => setAlertFilter(e.target.value)}
+                  value={alertFilters.status}
+                  onChange={(e) =>
+                    setAlertFilters((f) => ({
+                      ...f,
+                      status: e.target.value as AlertFilters["status"],
+                    }))
+                  }
                 >
                   <option value="open">Open</option>
-                  <option value="all">All alerts</option>
-                  <option value="critical">Critical</option>
                   <option value="acknowledged">Acknowledged</option>
+                  <option value="all">All alerts</option>
+                </select>
+              </label>
+              <label>
+                Type
+                <select
+                  value={alertFilters.type}
+                  onChange={(e) =>
+                    setAlertFilters((f) => ({ ...f, type: e.target.value }))
+                  }
+                >
+                  <option value="">All types</option>
+                  {alertSchema.shape.type.options.map((type) => (
+                    <option key={type} value={type}>
+                      {type.replaceAll("-", " ")}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Host
+                <select
+                  value={alertFilters.host}
+                  onChange={(e) =>
+                    setAlertFilters((f) => ({ ...f, host: e.target.value }))
+                  }
+                >
+                  <option value="">All hosts</option>
+                  {data.hosts.map((h) => (
+                    <option key={h.id} value={h.id}>
+                      {h.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Severity
+                <select
+                  value={alertFilters.severity}
+                  onChange={(e) =>
+                    setAlertFilters((f) => ({
+                      ...f,
+                      severity: e.target.value,
+                    }))
+                  }
+                >
+                  <option value="">All severities</option>
+                  <option value="critical">Critical</option>
+                  <option value="warning">Warning</option>
                 </select>
               </label>
               <p className="muted">
-                UI delivery is always enabled. Webhooks require operator
-                provisioning and policy opt-in.
+                Filters apply to loaded alerts. UI delivery is always enabled.
+                Webhooks require operator provisioning and policy opt-in.
               </p>
             </div>
-            {data.alerts
-              .filter(
-                (a) =>
-                  alertFilter === "all" ||
-                  (alertFilter === "open" && !a.acknowledged_by) ||
-                  (alertFilter === "acknowledged" && a.acknowledged_by) ||
-                  (alertFilter === "critical" &&
-                    a.body.severity === "critical"),
-              )
-              .map((a) => (
+            {filterAlerts(data.alerts, alertFilters).map((a) => {
+              const target = alertSnapshot(a, loadedSnapshots);
+              const link = target && {
+                tenantId,
+                snapshotId: target.snapshotId,
+              };
+              return (
                 <section className="row" key={a.id}>
                   <div>
                     <strong>{a.body.type.replaceAll("-", " ")}</strong>
                     <small>
-                      {date(a.created_at)} · {a.occurrences} reports ·{" "}
-                      {a.body.count} affected
+                      {date(a.created_at)} ·{" "}
+                      {data.hosts.find((h) => h.id === a.host_id)?.name ??
+                        a.host_id}{" "}
+                      · {a.occurrences} reports · {a.body.count} affected
                     </small>
                     <small>
                       {(() => {
@@ -926,28 +1077,28 @@ export function Console() {
                           : "No webhook delivery in loaded history";
                       })()}
                     </small>
-                    {a.body.snapshotId && (
+                    {link ? (
                       <a
-                        href={`#snapshot-${a.body.snapshotId}`}
+                        href={timelineHref(link)}
                         onClick={(event) => {
                           event.preventDefault();
-                          void run(async () => {
-                            const generation = sessionGeneration.current;
-                            const rows = await api<Snapshot[]>(
-                              `tenants/${tenantId}/snapshots/${a.body.snapshotId}`,
-                            );
-                            if (generation !== sessionGeneration.current)
-                              return;
-                            if (!rows[0])
-                              throw new Error("Snapshot no longer available");
-                            setPinnedSnapshot(rows[0]);
-                            setFilter(rows[0].id);
-                            setSection("Timeline");
-                          });
+                          window.history.pushState(
+                            null,
+                            "",
+                            timelineHref(link),
+                          );
+                          void openTimelineLink(link, tenants);
                         }}
                       >
-                        Open snapshot
+                        {target.exact
+                          ? "Open snapshot in timeline"
+                          : `No snapshot on this alert · open nearest for this host (captured ${date(target.capturedAt)})`}
                       </a>
+                    ) : (
+                      <small>
+                        No snapshot for this host in loaded history. Load more
+                        snapshots on the Timeline to search further back.
+                      </small>
                     )}
                   </div>
                   <span className="badge">{a.body.severity}</span>
@@ -961,11 +1112,18 @@ export function Console() {
                     {a.acknowledged_by ? "Acknowledged" : "Acknowledge"}
                   </Button>
                 </section>
-              ))}
-            {data.alerts.length === 0 && (
+              );
+            })}
+            {data.alerts.length === 0 ? (
               <Empty title="No alerts reported">
                 Detections from enrolled hosts will appear here.
               </Empty>
+            ) : (
+              filterAlerts(data.alerts, alertFilters).length === 0 && (
+                <Empty title="No alerts match these filters">
+                  Change the filters or load more alerts.
+                </Empty>
+              )
             )}
           </>
         )}
@@ -989,6 +1147,15 @@ export function Console() {
               Evidence is reported by the host. It does not independently attest
               that a sandbox was isolated or cloud recovery succeeded.
             </p>
+            {data.evidence.length > 0 && (
+              <section className="panel">
+                <h2>By agent and MCP server</h2>
+                <p className="muted">
+                  Across loaded reports. Skipped checks count as not passed.
+                </p>
+                <ProbeHistoryTable reports={data.evidence} />
+              </section>
+            )}
             {data.evidence.map((e) => (
               <section className="panel" key={e.id}>
                 <h2>{date(e.body.finishedAt)}</h2>
@@ -1282,6 +1449,7 @@ function PolicyEditor({
     event.preventDefault();
     void save(policy);
   };
+  const protectionError = storageProtectionError(policy);
   return (
     <form className="panel policy" onSubmit={submit}>
       <fieldset disabled={disabled}>
@@ -1426,12 +1594,24 @@ function PolicyEditor({
             {label}
           </label>
         ))}
+        {!lockCapableStorage.includes(policy.storage) && (
+          <p className="warning" role="note">
+            {policy.storage} storage does not support object lock or
+            immutability. Immutable primary storage and disaster recovery copies
+            need s3 or azure.
+          </p>
+        )}
+        {protectionError && (
+          <p className="error" role="alert">
+            {protectionError}
+          </p>
+        )}
         <p className="muted">
           These are requested policy requirements. Saving a policy does not
           validate storage capabilities or prove host enforcement. Alert
           delivery: UI only.
         </p>
-        <Button>Save policy</Button>
+        <Button disabled={!!protectionError}>Save policy</Button>
       </fieldset>
     </form>
   );

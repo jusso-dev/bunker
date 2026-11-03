@@ -276,7 +276,10 @@ export interface paths {
          */
         get: operations["get_tenants_tenantId_policies"];
         put?: never;
-        /** Create or update policies */
+        /**
+         * Create or update policies
+         * @description Each save increments version. Hosts see the new version on their next poll. immutable and drCopy require s3 or azure storage (S3 Object Lock or Azure version immutability); other storage returns 400. drCopy requires immutable.
+         */
         post: operations["post_tenants_tenantId_policies"];
         delete?: never;
         options?: never;
@@ -1198,6 +1201,40 @@ export interface components {
                         passed: boolean;
                     })[];
                 };
+            }[];
+            alerts: {
+                /** Format: uuid */
+                id: string;
+                /** Format: uuid */
+                tenant_id: string;
+                /** Format: uuid */
+                host_id: string;
+                /** Format: date-time */
+                created_at: string;
+                dedupe_key: string;
+                body: {
+                    /** Format: uuid */
+                    eventId: string;
+                    /** @enum {string} */
+                    type: "mass-delete" | "force-push" | "history-rewrite" | "mcp-change" | "skill-change" | "backup-failed" | "backup-missed" | "restore-test-failed";
+                    /** @enum {string} */
+                    severity: "warning" | "critical";
+                    snapshotId: string | null;
+                    count: number;
+                } | {
+                    /** @enum {string} */
+                    type: "mass-delete" | "force-push" | "history-rewrite" | "mcp-change" | "skill-change" | "backup-failed" | "backup-missed" | "restore-test-failed";
+                    /** @enum {string} */
+                    severity: "warning" | "critical";
+                    snapshotId: string | null;
+                    count: number;
+                };
+                occurrences: number;
+                acknowledged_by: string | null;
+                /** Format: date-time */
+                last_seen_at: string;
+                acknowledged: boolean;
+                acknowledged_at: string | null;
             }[];
             audit: {
                 id: string;

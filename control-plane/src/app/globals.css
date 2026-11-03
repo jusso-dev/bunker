@@ -467,3 +467,35 @@ tr:target {
     min-width: 100%;
   }
 }
+.warning {
+  padding: 14px 18px;
+  border: 1px solid #c8b582;
+  background: #fffae8;
+  color: #6b5413;
+  border-radius: 4px;
+}
+.checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.checklist > li {
+  border-block-start: 1px solid var(--line);
+  padding: 20px 0;
+}
+.checklist > li[aria-current="step"] {
+  border-inline-start: 3px solid #c8b582;
+  padding-inline-start: 16px;
+}
+.step-heading {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.checklist pre {
+  background: #f4f2ec;
+  padding: 12px 14px;
+  border-radius: 4px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}

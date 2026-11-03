@@ -492,8 +492,8 @@ test(
           immutable: true,
           drCopy: true,
           residency: "AU",
-          storage: "local",
-          storageRef: "local",
+          storage: "s3",
+          storageRef: "object-lock-bucket",
           keyRef: "kms-reference",
           massDeleteThreshold: 25,
           missedBackupMinutes: 90,
@@ -525,10 +525,49 @@ test(
           ).response.status,
           404,
         );
+        // Consumer and R2 targets cannot enforce object lock; the host refuses
+        // these combinations, so the control plane must never record them.
+        for (const storage of ["local", "gdrive", "onedrive", "r2"])
+          for (const protection of [
+            { immutable: true, drCopy: false },
+            { immutable: false, drCopy: true },
+          ]) {
+            const rejected = await call(
+              path("policies"),
+              { ...policy, ...protection, storage },
+              operator,
+            );
+            assert.equal(rejected.response.status, 400, storage);
+            assert.match(rejected.data.error, /object lock or immutability/);
+          }
+        assert.match(
+          (
+            await call(
+              path("policies"),
+              { ...policy, immutable: false, drCopy: true },
+              operator,
+            )
+          ).data.error,
+          /requires immutable primary storage/,
+        );
+        assert.equal(
+          (
+            await call(
+              path("policies"),
+              { ...policy, storage: "azure", hostId: randomUUID() },
+              operator,
+            )
+          ).response.status,
+          404,
+          "azure immutability passes storage validation",
+        );
         assert.equal(
           (await call(path("policies"), policy, operator)).data.version,
           1,
         );
+        const first = await call(path("policies"), undefined, hostToken, true);
+        assert.equal(first.data[0].version, 1);
+        assert.equal(first.response.headers.get("cache-control"), "no-store");
         assert.equal(
           (
             await call(
@@ -539,10 +578,15 @@ test(
           ).data.version,
           2,
         );
-        assert.equal(
-          (await call(path("policies"), undefined, hostToken, true)).data[0]
-            .body.intervalMinutes,
-          30,
+        // Hosts keep no cached policy and poll every 30 seconds, so the next
+        // fetch after a save must return the bumped version and new body.
+        const next = await call(path("policies"), undefined, hostToken, true);
+        assert.equal(next.data[0].id, first.data[0].id);
+        assert.equal(next.data[0].version, 2);
+        assert.equal(next.data[0].body.intervalMinutes, 30);
+        assert.ok(
+          new Date(next.data[0].updated_at) >=
+            new Date(first.data[0].updated_at),
         );
         assert.equal(
           (await call(path("policies"), { ...policy, hostId }, operator))
@@ -727,6 +771,15 @@ test(
           ).response.status,
           200,
         );
+        assert.ok(
+          (await call(path("audit"))).data.some(
+            (r: { action: string; resource_id: string; actor: string }) =>
+              r.action === "restore.denied" &&
+              r.resource_id === denied &&
+              r.actor === `human:${ids.approver}`,
+          ),
+          "denial is audited against the deciding human",
+        );
         assert.equal(
           (
             await call(
@@ -762,9 +815,32 @@ test(
         );
         assert.ok(
           (await call(path("audit"))).data.some(
-            (r: { action: string; resource_id: string }) =>
-              r.action === "restore.expired" && r.resource_id === expired,
+            (r: { action: string; resource_id: string; actor: string }) =>
+              r.action === "restore.expired" &&
+              r.resource_id === expired &&
+              r.actor === "system",
           ),
+          "expiry is audited by the system",
+        );
+        // Expiry is recorded once, not on every later tenant request.
+        await call(path("restores"), undefined, hostToken, true);
+        assert.equal(
+          (
+            await database().query(
+              "SELECT 1 FROM audit WHERE tenant_id=$1 AND resource_id=$2 AND action='restore.expired'",
+              [ids.tenant, expired],
+            )
+          ).rowCount,
+          1,
+        );
+        assert.equal(
+          (
+            await database().query(
+              "SELECT 1 FROM audit WHERE tenant_id=$1 AND resource_id=$2 AND action='restore.denied'",
+              [ids.tenant, denied],
+            )
+          ).rowCount,
+          1,
         );
       },
     );
@@ -818,6 +894,28 @@ test(
         assert.equal(report.response.status, 200);
         assert.equal(report.data.tenantId, ids.tenant);
         assert.equal(report.data.evidence.length, 1);
+        const exported = report.data.alerts as {
+          id: string;
+          body: { type: string };
+          acknowledged: boolean;
+          acknowledged_by: string | null;
+          acknowledged_at: string | null;
+        }[];
+        const acknowledged = exported.find((x) => x.id === a.data.id)!;
+        assert.equal(acknowledged.acknowledged, true);
+        assert.equal(acknowledged.acknowledged_by, ids.operator);
+        assert.ok(acknowledged.acknowledged_at);
+        const failed = exported.find(
+          (x) => x.body.type === "restore-test-failed",
+        )!;
+        assert.equal(failed.acknowledged, false);
+        assert.equal(failed.acknowledged_by, null);
+        assert.equal(failed.acknowledged_at, null);
+        assert.ok(
+          (await call(path("audit"))).data.some(
+            (r: { action: string }) => r.action === "evidence.exported",
+          ),
+        );
         assert.match(report.data.assurance, /not a compliance certification/);
         assert.equal(
           (await call(path("export"), undefined, hostToken, true)).response

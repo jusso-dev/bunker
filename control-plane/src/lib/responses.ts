@@ -132,6 +132,12 @@ export const exportResponse = z.strictObject({
     policyRow.extend({ tenant_id: s.uuid, host_id: s.uuid.nullable() }),
   ),
   evidence: evidenceResponse,
+  alerts: z.array(
+    alertRow.extend({
+      acknowledged: z.boolean(),
+      acknowledged_at: timestamp.nullable(),
+    }),
+  ),
   audit: auditResponse,
 });
 
