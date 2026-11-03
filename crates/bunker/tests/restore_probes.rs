@@ -343,6 +343,7 @@ fn captured_hooks_are_inert_data_and_probes_use_only_operator_commands() {
     assert_eq!(evidence.agents[0].outcome, ProbeOutcome::Passed);
 }
 
+#[cfg(unix)] // Git-aware capture is Unix-only in v1.
 #[test]
 fn git_snapshots_probe_verified_file_content_without_replaying_refs_or_config() {
     use std::process::Command;

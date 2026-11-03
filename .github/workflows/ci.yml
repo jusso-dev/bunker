@@ -24,7 +24,8 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      # Report every failing test binary, not just the first.
+      - run: cargo test --workspace --locked --no-fail-fast
       - run: cargo build --workspace --release --locked
       - name: Rust dependency advisory audit
         if: runner.os == 'Linux'

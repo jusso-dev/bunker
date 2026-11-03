@@ -1,4 +1,6 @@
 //! Public summary/authentication regressions; fixture-only, offline Git.
+// Git-aware capture and restore are Unix-only in v1 (docs/git-recovery.md).
+#![cfg(unix)]
 use bunker::{
     policy::Policy,
     repository::{Manifest, Repository},

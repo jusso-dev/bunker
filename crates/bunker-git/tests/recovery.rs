@@ -1,3 +1,5 @@
+// Git-aware capture and restore are Unix-only in v1 (docs/git-recovery.md).
+#![cfg(unix)]
 use bunker_git::{CapturePolicy, GitBackup};
 use std::{
     fs,

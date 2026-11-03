@@ -8,6 +8,10 @@
 4. Inspect the destination, snapshot, every path and action, content preview where available, before/after hashes, and secret-rebinding warnings. Content previews are redacted and may be truncated; inspect a separately restored copy where the preview is insufficient. The restore is additive/replacing: extra destination files are not automatically deleted.
 5. Run `bunker restore SNAPSHOT --repo PATH --workspace DESTINATION` without confirmation. This is a preview and must not change files.
 
+## Git workspaces
+
+On Linux and macOS, a snapshot of a Git workspace also captures what a push would not preserve: local branches, stashes, the index and untracked files. Committed objects already reachable from the remote are not stored again. `diff` and `restore` show and restore the Git state together with the files, under the same confirmation token. Git-aware capture and restore are Unix-only in v1: on Windows, snapshots still capture workspace files but record a `git_capture_failed_or_unsupported` diagnostic instead of Git state. See [Git recovery](../git-recovery.md) for the exact supported repository formats.
+
 ## Approve and verify
 
 After human review, run the same restore with `--confirm TOKEN`, using the exact `confirmation` from the current plan. Changing the destination content or selected file invalidates an earlier approval; preview again rather than reusing a stale token.

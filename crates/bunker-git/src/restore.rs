@@ -350,6 +350,9 @@ impl GitBackup {
         Ok(())
     }
     pub fn plan_restore(&self, root: &Path, capture: &Capture) -> Result<RestorePlan> {
+        if cfg!(not(unix)) {
+            anyhow::bail!("Git-aware restore is supported on Unix only in v1");
+        }
         let config = ConfigState::read(root, self.limits.max_metadata_bytes)?;
         let view = self.view(root)?;
         let refs = self.refs(&view)?;

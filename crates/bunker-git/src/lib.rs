@@ -577,6 +577,11 @@ impl GitBackup {
         policy: &CapturePolicy,
         previous: Option<&Metadata>,
     ) -> Result<Capture> {
+        // V1 Git support assumes Unix paths, modes and Git invocation; refuse
+        // explicitly instead of failing part-way (docs/git-recovery.md).
+        if cfg!(not(unix)) {
+            anyhow::bail!("Git-aware capture is supported on Unix only in v1");
+        }
         let view = self.view(root)?;
         let refs = self.refs(&view)?;
         let head_ref = self.head(&view)?;
