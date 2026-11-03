@@ -911,7 +911,7 @@ impl Custody {
         );
         // Existing partial publication may be retried, but unsafe paths are never replaced.
         self.read(name)?;
-        crate::repository::atomic_write(&self.dir, name, bytes, true)?;
+        crate::private_state::atomic_write(&self.dir, name, bytes, true)?;
         ensure!(
             self.read(name)?.as_deref() == Some(bytes),
             "custody readback failed"
@@ -965,7 +965,10 @@ fn policy_digest(policy: &RemotePolicy) -> Result<String> {
     }))?))
 }
 fn overlaps(a: &Path, b: &Path) -> bool {
-    a.starts_with(b) || b.starts_with(a)
+    #[cfg(windows)]
+    return crate::win_acl::overlaps(a, b);
+    #[cfg(not(windows))]
+    return a.starts_with(b) || b.starts_with(a);
 }
 fn checked_path(path: &Path, may_create: bool) -> Result<PathBuf> {
     ensure!(
@@ -975,6 +978,8 @@ fn checked_path(path: &Path, may_create: bool) -> Result<PathBuf> {
                 .any(|c| matches!(c, Component::CurDir | Component::ParentDir)),
         "host storage paths must be normalized absolute paths"
     );
+    #[cfg(windows)]
+    crate::win_acl::check_ancestors(path)?;
     // Unix requires the configured path to already be canonical; Windows allows only
     // verbatim-prefix and case differences. Either way the canonical form is returned.
     let resolved = if path.exists() {

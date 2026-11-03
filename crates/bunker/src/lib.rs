@@ -10,6 +10,7 @@ pub mod host_storage;
 pub mod logging;
 pub mod mcp;
 pub mod policy;
+mod private_state;
 pub mod protected_replication;
 pub mod protected_storage;
 pub mod repository;
@@ -19,3 +20,5 @@ pub mod session_hooks;
 pub mod storage;
 #[cfg(windows)]
 mod win_acl;
+#[cfg(any(windows, test))]
+mod win_acl_parser;

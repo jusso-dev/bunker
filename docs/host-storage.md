@@ -40,9 +40,26 @@ must not be writable by other users except sticky directories. On Windows the sa
 owner, link and reparse-point rules are enforced through ACLs (see
 [host integration](host-integration.md) point 6): new directories receive a protected
 DACL for the running user and SYSTEM instead of mode `0700`, and files inherit it.
-Windows has no equivalent of the ancestor-writability check yet, so keep state under
-a parent that only the service identity and administrators can modify. Other
-platforms fail closed.
+Existing private directories must contain an effective TokenUser allow ACE with
+both object and container inheritance; every allow ACE, including inherit-only
+entries, must name a trusted SID. New protected files are checked by handle before
+any content is written; ordinary repository files do not use this ACL policy.
+On Windows every ancestor is opened directly, from the volume root down, without
+following its final reparse point. Non-root reparse points (including junctions and
+mount points) are rejected. Effective untrusted allow ACEs granting `DELETE`
+(except on the root), `FILE_DELETE_CHILD`, `WRITE_DAC`, `WRITE_OWNER`, `GENERIC_ALL`
+or `GENERIC_WRITE` are rejected. Inherit-only ACEs are ignored for this ancestor
+check; create-file/create-folder grants alone are allowed, supporting standard
+volume, Users, Temp and ProgramData layouts. Ancestor control is trusted only for
+the token user, token default owner, SYSTEM, BUILTIN\Administrators (including
+when the process is not elevated) and the Windows TrustedInstaller service.
+Ancestor owners must also be trusted because ownership normally permits DACL
+changes without an explicit allow ACE. Leaf ownership/access retains the narrower
+token-user/token-default-owner/SYSTEM policy. Overlap checks fold Windows path
+case, including final components that do not yet exist. Handles are not retained
+for all later path operations: re-resolution after validation can still race with
+replacement by principals the ancestor check already trusts. Other platforms fail
+closed.
 
 Both state directories and configuration files must be disjoint from the repository
 and workspace, from each other, and from any local replication destination. The

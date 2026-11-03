@@ -6,9 +6,8 @@
 //! reparse points (symlinks, junctions) and multiply linked files are rejected.
 //! Trusted SIDs are the process token user, the token default owner (BUILTIN\Administrators
 //! for elevated administrators) and LocalSystem.
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use std::{
-    ffi::c_void,
     fs::File,
     io,
     os::windows::{
@@ -24,29 +23,34 @@ use windows_sys::Win32::{
         INVALID_HANDLE_VALUE,
     },
     Security::{
-        AddAccessAllowedAceEx, CreateWellKnownSid, EqualSid, GetAce, GetLengthSid,
+        AddAccessAllowedAceEx, CreateWellKnownSid, EqualSid, GetLengthSid,
         GetSecurityDescriptorControl, GetTokenInformation, InitializeAcl,
         InitializeSecurityDescriptor, IsValidSid, SetSecurityDescriptorControl,
-        SetSecurityDescriptorDacl, TokenOwner, TokenUser, WinLocalSystemSid, ACCESS_ALLOWED_ACE,
-        ACE_HEADER, ACL, ACL_REVISION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
-        OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-        SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SE_DACL_PROTECTED,
-        TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, WELL_KNOWN_SID_TYPE,
+        SetSecurityDescriptorDacl, TokenOwner, TokenUser, WinBuiltinAdministratorsSid,
+        WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, CONTAINER_INHERIT_ACE,
+        DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE, OBJECT_INHERIT_ACE,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+        SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SE_DACL_PROTECTED, TOKEN_OWNER, TOKEN_QUERY,
+        TOKEN_USER, WELL_KNOWN_SID_TYPE,
     },
     Storage::FileSystem::{
         CreateDirectoryW, CreateFileW, GetFileInformationByHandle, GetFileType,
-        BY_HANDLE_FILE_INFORMATION, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
-        OPEN_EXISTING, READ_CONTROL,
+        BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_TYPE_DISK, OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     },
-    System::Threading::{GetCurrentProcess, OpenProcessToken},
+    System::{
+        Memory::LocalSize,
+        Threading::{GetCurrentProcess, OpenProcessToken},
+    },
 };
 
 // winnt.h values; importing System_SystemServices for three constants is not worth it.
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+const GENERIC_ALL: u32 = 0x10000000;
+const GENERIC_WRITE: u32 = 0x40000000;
 
 /// A SID copied into owned, DWORD-aligned storage.
 struct Sid(Vec<u32>);
@@ -75,6 +79,23 @@ impl Sid {
     }
     fn as_psid(&self) -> PSID {
         self.0.as_ptr() as PSID
+    }
+    fn trusted_installer() -> Result<Self> {
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        // The Windows Modules Installer service owns standard system ancestors.
+        let mut raw = null_mut();
+        if unsafe {
+            ConvertStringSidToSidW(
+                windows_sys::w!("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"),
+                &mut raw,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error()).context("create TrustedInstaller SID");
+        }
+        let sid = unsafe { Self::copy(raw) };
+        unsafe { LocalFree(raw) };
+        sid
     }
     fn len(&self) -> u32 {
         unsafe { GetLengthSid(self.as_psid()) }
@@ -143,6 +164,36 @@ struct Security {
     descriptor: PSECURITY_DESCRIPTOR,
     owner: PSID,
     dacl: *mut ACL,
+}
+impl Security {
+    /// GetSecurityInfo returns one LocalAlloc descriptor allocation. Bound every
+    /// pointer and ACL/SID read by the allocation, not by attacker-controlled sizes.
+    fn bytes_from(&self, pointer: *const u8, minimum: usize) -> Result<&[u8]> {
+        let start = self.descriptor as usize;
+        let length = unsafe { LocalSize(self.descriptor) };
+        ensure!(
+            length != 0,
+            "cannot determine security descriptor allocation size"
+        );
+        let offset = (pointer as usize).checked_sub(start);
+        let offset = offset
+            .filter(|offset| *offset <= length)
+            .context("security data is outside its descriptor")?;
+        ensure!(minimum <= length - offset, "truncated security descriptor");
+        Ok(unsafe { std::slice::from_raw_parts(pointer, length - offset) })
+    }
+    fn entries(&self) -> Result<Vec<crate::win_acl_parser::Ace<'_>>> {
+        ensure!(
+            !self.dacl.is_null(),
+            "protected path has a NULL DACL granting everyone access"
+        );
+        crate::win_acl_parser::parse_acl(self.bytes_from(self.dacl.cast(), 8)?)
+    }
+    fn checked_owner(&self) -> Result<PSID> {
+        let bytes = self.bytes_from(self.owner.cast(), 8)?;
+        crate::win_acl_parser::sid_length(bytes)?;
+        Ok(self.owner)
+    }
 }
 impl Drop for Security {
     fn drop(&mut self) {
@@ -234,7 +285,7 @@ fn check_handle(handle: HANDLE, directory: bool) -> Result<()> {
     let trusted = Trusted::current()?;
     let security = security(handle)?;
     ensure!(
-        trusted.contains(security.owner),
+        trusted.contains(security.checked_owner()?),
         "protected path is not owned by the current user"
     );
     ensure!(
@@ -254,26 +305,95 @@ fn check_handle(handle: HANDLE, directory: bool) -> Result<()> {
             "protected directory inherits access from its parent"
         );
     }
-    let count = unsafe { (*security.dacl).AceCount };
-    for index in 0..u32::from(count) {
-        let mut ace: *mut c_void = null_mut();
-        if unsafe { GetAce(security.dacl, index, &mut ace) } == 0 {
-            return Err(io::Error::last_os_error()).context("read access control entry");
-        }
-        let kind = unsafe { (*ace.cast::<ACE_HEADER>()).AceType };
-        match kind {
-            // Deny entries only remove access.
-            ACCESS_DENIED_ACE_TYPE => {}
-            ACCESS_ALLOWED_ACE_TYPE => {
-                let sid =
-                    unsafe { std::ptr::addr_of_mut!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart) };
-                ensure!(
-                    trusted.contains(sid.cast()),
-                    "protected path grants access to another user or group"
-                );
+    let mut user_inherits = false;
+    for ace in security.entries()? {
+        if ace.kind == ACCESS_ALLOWED_ACE_TYPE {
+            let sid = ace.sid.as_ptr() as PSID;
+            // Include inherit-only entries: they must not grant untrusted child access.
+            ensure!(
+                trusted.contains(sid),
+                "protected path grants access to another user or group"
+            );
+            if ace.flags & INHERIT_ONLY_ACE as u8 == 0
+                && ace.flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8
+                    == (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8
+                && ace.mask != 0
+                && unsafe { EqualSid(trusted.user.as_psid(), sid) } != 0
+            {
+                user_inherits = true;
             }
-            // Object, callback and conditional entries are not expected here; fail closed.
-            _ => bail!("protected path has an unsupported access control entry"),
+        }
+    }
+    ensure!(
+        !directory || user_inherits,
+        "protected directory lacks an inheritable user allow entry"
+    );
+    Ok(())
+}
+
+/// Check each ancestor object from the volume root down, before resolving lower
+/// components. Creation-only grants are safe; replacement and ACL-control grants
+/// are allowed only for trusted state SIDs and Windows system administrators.
+/// Root DELETE is immaterial; root child-deletion and ACL-control grants matter.
+pub(crate) fn check_ancestors(path: &Path) -> Result<()> {
+    ensure!(
+        path.is_absolute()
+            && !path.components().any(|c| matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )),
+        "private state path must be normalized and absolute"
+    );
+    let trusted = Trusted::current()?;
+    // Standard volume/profile ancestors grant Administrators full control even
+    // for non-elevated users. Administrators already control these Windows paths.
+    let administrators = Sid::well_known(WinBuiltinAdministratorsSid)?;
+    let installer = Sid::trusted_installer()?;
+    let ancestor_trusts = |sid: PSID| {
+        trusted.contains(sid)
+            || (unsafe { IsValidSid(sid) } != 0
+                && [&administrators, &installer]
+                    .iter()
+                    .any(|trusted| unsafe { EqualSid(trusted.as_psid(), sid) } != 0))
+    };
+    let ancestors: Vec<_> = path.ancestors().skip(1).collect();
+    for ancestor in ancestors.into_iter().rev() {
+        let root = ancestor.parent().is_none();
+        let handle = open_no_follow(ancestor, READ_CONTROL | FILE_READ_ATTRIBUTES)
+            .with_context(|| format!("open private state ancestor {}", ancestor.display()))?;
+        let raw = handle.as_raw_handle() as HANDLE;
+        let info = information(raw)?;
+        ensure!(
+            info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            "private state ancestor is not a directory"
+        );
+        ensure!(
+            root || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+            "private state ancestor is a symlink, junction or mount point"
+        );
+        let security = security(raw)?;
+        // An owner can normally rewrite the DACL even without a WRITE_DAC ACE.
+        ensure!(
+            ancestor_trusts(security.checked_owner()?),
+            "private state ancestor has an untrusted owner: {}",
+            ancestor.display()
+        );
+        let dangerous = FILE_DELETE_CHILD
+            | WRITE_DAC
+            | WRITE_OWNER
+            | GENERIC_ALL
+            | GENERIC_WRITE
+            | if root { 0 } else { DELETE };
+        for ace in security.entries()? {
+            if ace.kind == ACCESS_ALLOWED_ACE_TYPE
+                && ace.flags & INHERIT_ONLY_ACE as u8 == 0
+                && ace.mask & dangerous != 0
+            {
+                let sid = ace.sid.as_ptr() as PSID;
+                ensure!(ancestor_trusts(sid),
+                    "private state ancestor grants replacement or ACL control to another user or group: {}",
+                    ancestor.display());
+            }
         }
     }
     Ok(())
@@ -366,11 +486,19 @@ pub(crate) fn directory_identity(path: &Path) -> Result<(u64, u64)> {
 
 /// Whether `path` names the same location as `canonical` (a `canonicalize` result).
 /// Verbatim `\\?\` prefixes are ignored for drive and UNC paths and case is folded, so any
-/// remaining difference means a symlinked, junctioned or 8.3-aliased component.
+/// remaining difference is rejected as an alias. Ancestor reparse checks, rather
+/// than this string comparison, establish the absence of junctions/symlinks.
 pub(crate) fn same_path(path: &Path, canonical: &Path) -> bool {
     match (comparable(path), comparable(canonical)) {
         (Some(a), Some(b)) => a == b,
         _ => path == canonical,
+    }
+}
+/// Conservative Windows overlap comparison, including prospective final names.
+pub(crate) fn overlaps(a: &Path, b: &Path) -> bool {
+    match (comparable(a), comparable(b)) {
+        (Some(a), Some(b)) => a.starts_with(&b) || b.starts_with(&a),
+        _ => true, // Non-Unicode names cannot be safely compared by this policy.
     }
 }
 fn comparable(path: &Path) -> Option<PathBuf> {
@@ -405,6 +533,9 @@ mod tests {
     }
     fn set_protected_dacl(path: &Path, sids: &[&Sid]) {
         let acl = protected_acl(sids).unwrap();
+        install_dacl(path, &acl);
+    }
+    fn install_dacl(path: &Path, acl: &[u32]) {
         let handle = open_no_follow(path, WRITE_DAC | READ_CONTROL).unwrap();
         let status = unsafe {
             SetSecurityInfo(
@@ -418,6 +549,108 @@ mod tests {
             )
         };
         assert_eq!(status, ERROR_SUCCESS);
+    }
+
+    fn custom_acl(path: &Path, user_flags: u32, extra: Option<(&Sid, u32, u32)>) {
+        let trusted = Trusted::current().unwrap();
+        let mut acl = vec![0u32; 256];
+        let pointer = acl.as_mut_ptr().cast();
+        assert_ne!(unsafe { InitializeAcl(pointer, 1024, ACL_REVISION) }, 0);
+        assert_ne!(
+            unsafe {
+                AddAccessAllowedAceEx(
+                    pointer,
+                    ACL_REVISION,
+                    user_flags,
+                    FILE_ALL_ACCESS,
+                    trusted.user.as_psid(),
+                )
+            },
+            0
+        );
+        if let Some((sid, mask, flags)) = extra {
+            assert_ne!(
+                unsafe { AddAccessAllowedAceEx(pointer, ACL_REVISION, flags, mask, sid.as_psid()) },
+                0
+            );
+        }
+        install_dacl(path, &acl);
+    }
+
+    #[test]
+    fn non_inheritable_owner_only_directory_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = private(temp.path());
+        custom_acl(&dir, 0, None);
+        let error = check_path(&dir, true).unwrap_err();
+        assert!(error.to_string().contains("inheritable user allow"));
+        custom_acl(
+            &dir,
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+            None,
+        );
+        assert!(check_path(&dir, true).is_err());
+        let trusted = Trusted::current().unwrap();
+        set_protected_dacl(&dir, &[&trusted.user, &trusted.system]);
+    }
+
+    #[test]
+    fn untrusted_ancestor_replacement_rights_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = private(temp.path());
+        let everyone = Sid::well_known(WinWorldSid).unwrap();
+        for mask in [
+            FILE_DELETE_CHILD,
+            FILE_ALL_ACCESS,
+            DELETE,
+            WRITE_DAC,
+            WRITE_OWNER,
+            GENERIC_ALL,
+            GENERIC_WRITE,
+        ] {
+            custom_acl(&ancestor, 0, Some((&everyone, mask, 0)));
+            let error = check_ancestors(&ancestor.join("state")).unwrap_err();
+            assert!(error.to_string().contains("replacement or ACL control"));
+        }
+    }
+
+    #[test]
+    fn standard_temp_ancestry_and_creation_only_grants_are_accepted() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        check_ancestors(&base.join("state")).unwrap();
+        let ancestor = private(&base);
+        let everyone = Sid::well_known(WinWorldSid).unwrap();
+        // Standard root/ProgramData creation-only grants do not allow replacement.
+        custom_acl(&ancestor, 0, Some((&everyone, 0x6, 0)));
+        check_ancestors(&ancestor.join("state")).unwrap();
+        // Standard temp/root inherit-only Modify grants are not effective here.
+        custom_acl(
+            &ancestor,
+            0,
+            Some((
+                &everyone,
+                FILE_ALL_ACCESS,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+            )),
+        );
+        check_ancestors(&ancestor.join("state")).unwrap();
+    }
+
+    #[test]
+    fn protected_write_rejects_unsafe_new_file_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = private(temp.path());
+        let trusted = Trusted::current().unwrap();
+        let everyone = Sid::well_known(WinWorldSid).unwrap();
+        set_protected_dacl(&dir, &[&trusted.user, &everyone]);
+        let capability =
+            cap_std::fs::Dir::open_ambient_dir(&dir, cap_std::ambient_authority()).unwrap();
+        assert!(
+            crate::private_state::atomic_write(&capability, "secret", b"fixture", true).is_err()
+        );
+        assert!(!dir.join("secret").exists());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
     }
 
     #[test]
@@ -504,5 +737,22 @@ mod tests {
             Path::new(r"C:\PROGRA~1\Host"),
             Path::new(r"\\?\C:\Program Files\Host")
         ));
+    }
+
+    #[test]
+    fn overlap_comparison_folds_case_and_prospective_names() {
+        assert!(overlaps(
+            Path::new(r"C:\State\Future"),
+            Path::new(r"c:\state\FUTURE")
+        ));
+        assert!(overlaps(
+            Path::new(r"C:\State"),
+            Path::new(r"\\?\c:\STATE\future")
+        ));
+        assert!(overlaps(
+            Path::new(r"\\Server\Share\State"),
+            Path::new(r"\\?\UNC\server\share\STATE\child")
+        ));
+        assert!(!overlaps(Path::new(r"C:\State"), Path::new(r"C:\State2")));
     }
 }
