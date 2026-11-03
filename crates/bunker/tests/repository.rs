@@ -195,7 +195,10 @@ fn restore_takes_pre_restore_safety_snapshot_only_when_overwriting() {
     repository
         .restore(&snapshot.id, &work, None, &plan.confirmation)
         .unwrap();
-    assert_eq!(fs::read_to_string(work.join("file.txt")).unwrap(), "original");
+    assert_eq!(
+        fs::read_to_string(work.join("file.txt")).unwrap(),
+        "original"
+    );
     // The safety snapshot undoes the restore.
     let undo = repository.plan(&safety.id, &work, None).unwrap();
     repository
@@ -205,6 +208,26 @@ fn restore_takes_pre_restore_safety_snapshot_only_when_overwriting() {
         fs::read_to_string(work.join("file.txt")).unwrap(),
         "unsaved work"
     );
+}
+
+#[test]
+fn pre_restore_snapshot_refuses_to_omit_overwritten_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = repo(temp.path());
+    let work = workspace(temp.path());
+    fs::write(work.join("file.txt"), "original").unwrap();
+    let snapshot = repository
+        .snapshot(&work, &Policy::default(), None, None, "manual")
+        .unwrap();
+    fs::write(work.join("file.txt"), "current").unwrap();
+    let plan = repository.plan(&snapshot.id, &work, None).unwrap();
+    let policy = Policy {
+        exclusions: vec!["file.txt".into()],
+        ..Policy::default()
+    };
+    let error = repository.pre_restore_snapshot(&plan, &policy).unwrap_err();
+    assert!(error.to_string().contains("omitted a file to overwrite"));
+    assert_eq!(fs::read(work.join("file.txt")).unwrap(), b"current");
 }
 
 #[test]

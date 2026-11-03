@@ -223,6 +223,7 @@ struct RuntimeDiagnostic {
 }
 const MAX_OUTBOX: usize = 256;
 const MAX_ALERTS: usize = 512;
+const MAX_DETECTIONS: usize = 5;
 const MAX_DIAGNOSTICS: usize = 64;
 const MAX_EVIDENCE_OUTBOX: usize = 16;
 const STATE: &str = "host/schedule";
@@ -488,7 +489,7 @@ fn attempt_setup(
     save_schedule(repo, state)
 }
 fn finish_detection(repo: &Repository, state: &mut Schedule) -> Result<()> {
-    if state.pending_alerts.len() > MAX_ALERTS - 4 {
+    if state.pending_alerts.len() > MAX_ALERTS - MAX_DETECTIONS {
         return Ok(());
     }
     if let Some(pending) = &state.pending_detection {
@@ -539,7 +540,9 @@ fn scheduled_work(
     }
     let reconciled = reconcile_session_captures(repo, state)?;
     if state.pending_detection.is_none() && reconciled && now() >= state.next_run {
-        if state.pending.len() >= MAX_OUTBOX || state.pending_alerts.len() > MAX_ALERTS - 4 {
+        if state.pending.len() >= MAX_OUTBOX
+            || state.pending_alerts.len() > MAX_ALERTS - MAX_DETECTIONS
+        {
             // Backpressure is explicit and preserves every pending delivery. It
             // pauses new capture only after bounded capacity is exhausted; the
             // existing outbox is still returned so successful delivery can drain it.
@@ -647,6 +650,18 @@ fn outbox(state: &Schedule) -> WorkResults {
         alerts,
         evidence: state.pending_evidence.clone(),
     }
+}
+fn publish_missed_alerts(
+    state: &Schedule,
+    mut publish: impl FnMut(&ObservedAlert) -> Result<()>,
+) -> Result<()> {
+    for alert in outbox(state).alerts {
+        if matches!(alert.kind, AlertKind::BackupMissed) {
+            publish(&alert)?;
+        }
+    }
+    // Keep the durable outbox until the entire cycle succeeds; repeated sends deduplicate.
+    Ok(())
 }
 
 fn skipped_probe(
@@ -828,7 +843,7 @@ fn reconcile_session_captures(repo: &Repository, state: &mut Schedule) -> Result
         if let Some(snapshot) = published_session(repo, &state.sessions[index])? {
             if state.pending.len() >= MAX_OUTBOX
                 || state.pending_detection.is_some()
-                || state.pending_alerts.len() > MAX_ALERTS - 4
+                || state.pending_alerts.len() > MAX_ALERTS - MAX_DETECTIONS
             {
                 return Ok(false);
             }
@@ -866,7 +881,7 @@ fn capture_host_session(
         "session comparison backpressure"
     );
     ensure!(
-        state.pending_alerts.len() <= MAX_ALERTS - 4,
+        state.pending_alerts.len() <= MAX_ALERTS - MAX_DETECTIONS,
         "session alert outbox is full"
     );
     if session.workspace_snapshot.is_none() {
@@ -1127,7 +1142,11 @@ pub fn run(
                 })?;
                 work.evidence = state.pending_evidence.clone();
                 Ok(work)
-            })?;
+            });
+            if report.is_err() {
+                let _ = publish_missed_alerts(&state, |alert| host.publish_alert(alert));
+            }
+            let report = report?;
             state.pending.clear();
             state.pending_alerts.clear();
             state.pending_evidence.clear();
@@ -2084,8 +2103,8 @@ mod schedule_policy_tests {
         state.last_success -= 1000;
         state.next_run -= 1000;
         let ten_minutes = policy(600, 0);
-        let work = scheduled_work(&repo, &workspace, "codex", &ten_minutes, &mut state, None)
-            .unwrap();
+        let work =
+            scheduled_work(&repo, &workspace, "codex", &ten_minutes, &mut state, None).unwrap();
         assert_eq!(work.snapshots.len(), 1, "shorter interval did not apply");
         assert_eq!(state.interval_seconds, 600);
         assert_eq!(state.next_run, state.last_success + 600);
@@ -2109,9 +2128,7 @@ mod schedule_policy_tests {
         for _ in 0..200 {
             state.interval_seconds = 0;
             apply_interval(&mut state, &jittered);
-            assert!(
-                (state.last_success + 600..=state.last_success + 720).contains(&state.next_run)
-            );
+            assert!((state.last_success + 600..=state.last_success + 720).contains(&state.next_run));
             seen.insert(state.next_run);
         }
         assert!(seen.len() > 1, "host schedule ignored jitter");
@@ -2167,6 +2184,60 @@ mod schedule_policy_tests {
             ),
             id
         );
+    }
+
+    #[test]
+    fn missed_alert_is_delivered_even_when_capture_keeps_failing() {
+        let (_temp, workspace, repo, mut state) = fixture();
+        let policy = Policy {
+            missed_backup_seconds: Some(600),
+            size_cap_bytes: 1,
+            max_file_bytes: 1,
+            ..policy(600, 0)
+        };
+        state.last_success = now() - 1000;
+        state.interval_seconds = 600;
+        state.next_run = 0;
+        // Two eligible files exceed the policy cap without being skipped as oversized files.
+        fs::write(workspace.join("a"), "a").unwrap();
+        fs::write(workspace.join("b"), "b").unwrap();
+        assert!(scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).is_err());
+        let mut delivered = vec![];
+        publish_missed_alerts(&state, |alert| {
+            assert!(matches!(alert.kind, AlertKind::BackupMissed));
+            delivered.push(alert.event_id);
+            Ok(())
+        })
+        .unwrap();
+        let state = load_schedule(&repo, &workspace, state.host.unwrap()).unwrap();
+        publish_missed_alerts(&state, |alert| {
+            delivered.push(alert.event_id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0], delivered[1]);
+        assert_eq!(state.pending_alerts.len(), 1);
+    }
+
+    #[test]
+    fn mcp_and_skill_detections_map_to_distinct_host_alerts() {
+        let state = Schedule {
+            pending_alerts: ["mcp_config_changed", "skill_changed"]
+                .into_iter()
+                .map(|kind| crate::scheduler::Alert {
+                    kind: kind.into(),
+                    fingerprint: kind.into(),
+                    detected_at: now(),
+                    snapshot: None,
+                    count: 1,
+                })
+                .collect(),
+            ..Schedule::default()
+        };
+        let results = outbox(&state);
+        assert!(matches!(results.alerts[0].kind, AlertKind::McpChange));
+        assert!(matches!(results.alerts[1].kind, AlertKind::SkillChange));
     }
 
     #[test]
@@ -2228,9 +2299,21 @@ mod schedule_policy_tests {
         let at = now();
         let id = failure_event_id(identity.host, Uuid::from_u128(9), 3600, at);
         let window = at - at % 3600;
-        assert_eq!(id, failure_event_id(identity.host, Uuid::from_u128(9), 3600, window + 3599));
-        assert_ne!(id, failure_event_id(identity.host, Uuid::from_u128(9), 3600, window + 3600));
-        assert_ne!(id, failure_event_id(Uuid::new_v4(), Uuid::from_u128(9), 3600, at));
-        assert_ne!(id, failure_event_id(identity.host, Uuid::from_u128(10), 3600, at));
+        assert_eq!(
+            id,
+            failure_event_id(identity.host, Uuid::from_u128(9), 3600, window + 3599)
+        );
+        assert_ne!(
+            id,
+            failure_event_id(identity.host, Uuid::from_u128(9), 3600, window + 3600)
+        );
+        assert_ne!(
+            id,
+            failure_event_id(Uuid::new_v4(), Uuid::from_u128(9), 3600, at)
+        );
+        assert_ne!(
+            id,
+            failure_event_id(identity.host, Uuid::from_u128(10), 3600, at)
+        );
     }
 }

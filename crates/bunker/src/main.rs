@@ -421,11 +421,12 @@ fn log_level(flag: Option<bunker::logging::Level>) -> Result<bunker::logging::Le
     }
     match std::env::var("BUNKER_LOG") {
         Err(std::env::VarError::NotPresent) => Ok(bunker::logging::Level::Info),
-        Ok(value) if value.is_empty() => Ok(bunker::logging::Level::Info),
         Ok(value) => value
             .parse()
             .map_err(|error: String| anyhow::anyhow!("BUNKER_LOG: {error}")),
-        Err(_) => anyhow::bail!("BUNKER_LOG: invalid log level; expected error, warn, info or debug"),
+        Err(_) => {
+            anyhow::bail!("BUNKER_LOG: invalid log level; expected error, warn, info or debug")
+        }
     }
 }
 fn run() -> Result<()> {
@@ -867,9 +868,7 @@ fn run() -> Result<()> {
                 HostAction::ReviewRestore { id } => print(host.local_restore_preview(&repo, &id)?),
                 HostAction::ExecuteRestore { id } => {
                     let safety = host.execute_restore_once(&repo, &consumed, &id)?;
-                    print(
-                        serde_json::json!({"restored_once":true,"pre_restore_snapshot":safety}),
-                    )
+                    print(serde_json::json!({"restored_once":true,"pre_restore_snapshot":safety}))
                 }
                 HostAction::Enroll { .. } | HostAction::Run { .. } => unreachable!(),
             }

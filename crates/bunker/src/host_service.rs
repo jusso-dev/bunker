@@ -1090,7 +1090,7 @@ pub fn failure_event_id(host: Uuid, policy: Uuid, interval_seconds: u64, at: u64
     let window = at / interval_seconds.max(1);
     Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
-        format!("bunker:backup_failed:{host}:{policy}:{window}").as_bytes(),
+        format!("bunker:backup_failed:{host}:{policy}:{interval_seconds}:{window}").as_bytes(),
     )
 }
 impl<T: Transport> HostClient<T> {
@@ -1223,6 +1223,10 @@ impl ProductionHost {
     ) -> Result<CycleReport> {
         self.refresh()?;
         self.service.session_cycle(repo, bindings, work)
+    }
+    pub(crate) fn publish_alert(&mut self, alert: &ObservedAlert) -> Result<()> {
+        self.refresh()?;
+        self.service.client.publish_alert(alert)
     }
     pub fn request_restore(
         &mut self,

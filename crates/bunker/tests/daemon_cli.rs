@@ -106,16 +106,25 @@ fn invalid_log_levels_are_rejected_clearly() {
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["level"], "error");
     let message = lines[0]["message"].as_str().unwrap();
-    assert!(message.starts_with("BUNKER_LOG: invalid log level"), "{message}");
+    assert!(
+        message.starts_with("BUNKER_LOG: invalid log level"),
+        "{message}"
+    );
     assert!(
         !f.repo.join("schedule.json").exists(),
         "rejected configuration still ran the scheduler"
     );
+    let empty = f.daemon_once(|c| {
+        c.env("BUNKER_LOG", "");
+    });
+    assert!(!empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("invalid log level"));
 }
 
 #[cfg(unix)]
 #[test]
 fn running_daemon_answers_status_and_stops_cleanly() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     use std::{
         process::Stdio,
         time::{Duration, Instant},
@@ -157,6 +166,9 @@ fn running_daemon_answers_status_and_stops_cleanly() {
     };
     assert_eq!(status["running"], true);
     assert_eq!(status["mode"], "standalone");
+    let socket = fs::metadata(f.repo.join("daemon.sock")).unwrap();
+    assert!(socket.file_type().is_socket());
+    assert_eq!(socket.permissions().mode() & 0o777, 0o600);
     assert_eq!(
         status["state"]["workspace"],
         f.work.to_str().unwrap(),

@@ -717,7 +717,14 @@ impl Repository {
         plan: &RestorePlan,
         policy: &Policy,
     ) -> Result<Option<Manifest>> {
-        if plan.git.is_none() && !plan.changes.iter().any(|c| c.action == "overwrite") {
+        let git_changes = plan.git.as_ref().is_some_and(|git| {
+            git.prior_index_fingerprint.as_ref() != Some(&git.desired_index_fingerprint)
+                || git.desired_refs.iter().any(|(name, oid)| {
+                    git.prior_refs.get(name).and_then(Option::as_ref) != Some(oid)
+                })
+                || !git.stash_oldest_first.is_empty()
+        });
+        if !git_changes && !plan.changes.iter().any(|c| c.action == "overwrite") {
             return Ok(None);
         }
         let manifest = self.snapshot(
@@ -727,6 +734,16 @@ impl Repository {
             None,
             "pre-restore",
         )?;
+        ensure!(
+            !git_changes || manifest.git.is_some(),
+            "pre-restore snapshot could not capture current Git state; restore not started"
+        );
+        ensure!(
+            plan.changes.iter().filter(|c| c.action == "overwrite").all(|change| {
+                manifest.files.iter().any(|file| file.path == change.path)
+            }),
+            "pre-restore snapshot omitted a file to overwrite; check snapshot policy and diagnostics; restore not started"
+        );
         self.audit(
             "pre_restore_snapshot",
             serde_json::json!({"snapshot":manifest.id,"restoring":plan.snapshot}),

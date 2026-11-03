@@ -1,6 +1,6 @@
 # CLI reference
 
-Run `bunker --help` and `bunker COMMAND --help` for the installed revision. Global flags are `--repo PATH` (default `.bunker-repository`), `--policy PATH` (optional TOML), `--help`, and `--version`. Always pass an explicit repository outside the workspace. Most operations need `BUNKER_PASSPHRASE`; `discover`, `status`, `policy-defaults`, and help do not.
+Run `bunker --help` and `bunker COMMAND --help` for the installed revision. Global flags are `--repo PATH` (default `.bunker-repository`), `--policy PATH` (optional TOML), `--log-level LEVEL`, `--help`, and `--version`. Always pass an explicit repository outside the workspace. Most operations need `BUNKER_PASSPHRASE`; `discover`, `status`, `policy-defaults`, and help do not.
 
 | Command | Arguments and behavior |
 | --- | --- |
@@ -9,7 +9,7 @@ Run `bunker --help` and `bunker COMMAND --help` for the installed revision. Glob
 | `snapshot` | Required `--workspace PATH`; optional `--agent NAME`, `--session LABEL`, `--trigger LABEL` (default `manual`). Captures eligible files under the workspace with the local policy. |
 | `list` | Lists decrypted snapshot metadata. Treat output as sensitive. |
 | `diff SNAPSHOT` | Required `--workspace PATH`; optional `--file RELATIVE_PATH`. Prints planned creates/replacements and a confirmation bound to the plan. |
-| `restore SNAPSHOT` | Same destination and file flags as `diff`; without `--confirm TOKEN`, only previews. With the reviewed token, applies the plan. Replacing settings containing unbound secret placeholders also requires explicit `--allow-rebind-overwrite`. |
+| `restore SNAPSHOT` | Same destination and file flags as `diff`; without `--confirm TOKEN`, only previews. With the reviewed token, applies the plan. Before overwriting current files or Git state, captures a safety snapshot with trigger `pre-restore` and reports its ID as `pre_restore_snapshot`; skips it when there is no existing state to replace. Replacing settings containing unbound secret placeholders also requires explicit `--allow-rebind-overwrite`. |
 | `verify SNAPSHOT` | Authenticates referenced objects and verifies file hashes. |
 | `restore-test SNAPSHOT` | Restores into a disposable directory and records file-integrity evidence. Add `--workspace SOURCE --probe-config PATH` to run explicitly configured isolated boot/MCP probes; runtime/configuration paths must be outside the source workspace and repository. |
 | `rewrap-passphrase` | Re-wraps the same repository data key using `BUNKER_NEW_PASSPHRASE`; also needs the old `BUNKER_PASSPHRASE`. `rotate-key` remains a compatibility alias. This does not rotate the data key or revoke old copies; the stable remote chunk namespace is unchanged, but the next replication returns a new recovery locator. |
@@ -20,7 +20,7 @@ Run `bunker --help` and `bunker COMMAND --help` for the installed revision. Glob
 | `replicate --storage PATH` | Uploads encrypted repository objects using a TOML storage configuration, verifies readback, and returns a pinned repository/header/checkpoint recovery locator. For immutable S3/Azure require `--retain-days N --report PATH`; optional `--dr-storage PATH` creates the same protected inventory on an independent backend. |
 | `recover --storage PATH --namespace ID` | Downloads and verifies a remote repository into the non-existent destination `--repo PATH`. For version-pinned protected copies add `--protection-report PATH`; optional `--escrow PATH` supplies the recovery envelope. This recovers the repository; use `restore` for workspace files. |
 | `daemon --workspace PATH` | Runs scheduled local snapshots; `--once` performs one cycle and exits. Reads local `--policy` if supplied. `--probe-config PATH` enables standalone scheduled restore probes; authenticated host mode uses its host configuration instead. |
-| `status` | Reads local scheduler status; not an end-to-end cloud health or restore-readiness check. |
+| `status` | Queries the running standalone or host daemon through its local Unix status socket; not an end-to-end cloud health or restore-readiness check. |
 | `mcp --workspace PATH` | Serves the implemented JSON-RPC tool interface on standard input/output. Keep diagnostics and passphrases out of protocol output. |
 | `policy-defaults` | Prints current local-policy defaults in TOML. |
 | `help [COMMAND]` | Shows command help without opening a repository. |
@@ -51,3 +51,7 @@ Additional integrated commands:
 Legacy local `approve` remains disabled. With `mcp --host-config PATH --workspace PATH`,
 requests use the production bridge; a separately authenticated human approves the
 saved plan in the UI, and the host rechecks authorization at mutation boundaries.
+
+Daemon and host diagnostics are JSON lines on stderr with `time`, `level`, `message`, and event fields. Set global `--log-level error|warn|info|debug` or `BUNKER_LOG`; the flag takes precedence and the default is `info`. Invalid levels are rejected. Debug scheduler/cycle records are emitted only at `debug`.
+
+Host-approved `execute-restore` also captures and reports `pre_restore_snapshot` before destructive restore. Safety snapshots use the local snapshot exclusions, sanitization, and size limits (the default local policy for host-approved restores). Snapshot failure stops the restore before writes. Secret rebindings still require separate custody; safety snapshots do not retain excluded secrets.

@@ -120,6 +120,49 @@ impl Fixture {
 }
 
 #[test]
+fn pre_restore_snapshot_preserves_git_and_skips_unchanged_state() {
+    let f = Fixture::new();
+    let snapshot = f.snapshot();
+    let plan = f.repo.plan(&snapshot.id, &f.target, None).unwrap();
+    f.repo
+        .restore(&snapshot.id, &f.target, None, &plan.confirmation)
+        .unwrap();
+    let unchanged = f.repo.plan(&snapshot.id, &f.target, None).unwrap();
+    assert!(f
+        .repo
+        .pre_restore_snapshot(&unchanged, &Policy::default())
+        .unwrap()
+        .is_none());
+    assert_eq!(f.repo.list().unwrap().len(), 1);
+
+    fs::write(f.target.join("a.txt"), "new local commit\n").unwrap();
+    git(&f.target, &["add", "a.txt"]);
+    git(&f.target, &["commit", "-m", "local"]);
+    let before = git(&f.target, &["rev-parse", "HEAD"]);
+    let plan = f.repo.plan(&snapshot.id, &f.target, None).unwrap();
+    let safety = f
+        .repo
+        .pre_restore_snapshot(&plan, &Policy::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(safety.trigger, "pre-restore");
+    assert!(safety.git.is_some());
+    f.repo
+        .restore(&snapshot.id, &f.target, None, &plan.confirmation)
+        .unwrap();
+    assert_eq!(git(&f.target, &["rev-parse", "HEAD"]), f.baseline);
+    let undo = f.repo.plan(&safety.id, &f.target, None).unwrap();
+    f.repo
+        .restore(&safety.id, &f.target, None, &undo.confirmation)
+        .unwrap();
+    assert_eq!(git(&f.target, &["rev-parse", "HEAD"]), before);
+    assert_eq!(
+        fs::read(f.target.join("a.txt")).unwrap(),
+        b"new local commit\n"
+    );
+}
+
+#[test]
 fn captures_encrypted_git_and_restores_branches_stash_index_and_working_bytes() {
     let f = Fixture::new();
     f.local_state();

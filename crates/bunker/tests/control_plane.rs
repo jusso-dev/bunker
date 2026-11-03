@@ -1290,7 +1290,10 @@ fn host_runtime_answers_local_status_and_stops_cleanly() {
     fs::create_dir(&work).unwrap();
     fs::write(work.join("file"), "fixture").unwrap();
     // Nothing listens here: every cycle fails and the runtime keeps retrying.
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
     let config = root.join("host.toml");
     fs::write(
         &config,
@@ -1316,7 +1319,8 @@ fn host_runtime_answers_local_status_and_stops_cleanly() {
         command
             .arg("--repo")
             .arg(&repo)
-            .env("BUNKER_PASSPHRASE", "host-status-fixture");
+            .env("BUNKER_PASSPHRASE", "host-status-fixture")
+            .env_remove("BUNKER_LOG");
         command
     };
     let mut child = command()
@@ -1354,7 +1358,10 @@ fn host_runtime_answers_local_status_and_stops_cleanly() {
     assert_eq!(status["host"], identity().host.to_string());
     assert!(status["state"]["next_cycle_at"].as_u64().unwrap() > 0);
     let wire = status.to_string();
-    assert!(!wire.contains(root.to_str().unwrap()), "status leaked a path");
+    assert!(
+        !wire.contains(root.to_str().unwrap()),
+        "status leaked a path"
+    );
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
     let deadline = Instant::now() + Duration::from_secs(10);
     let exit = loop {
@@ -1367,7 +1374,10 @@ fn host_runtime_answers_local_status_and_stops_cleanly() {
         }
         thread::sleep(Duration::from_millis(50));
     };
-    assert!(exit.success(), "host runtime did not exit cleanly: {exit:?}");
+    assert!(
+        exit.success(),
+        "host runtime did not exit cleanly: {exit:?}"
+    );
     let mut stderr = String::new();
     child
         .stderr
@@ -1375,7 +1385,10 @@ fn host_runtime_answers_local_status_and_stops_cleanly() {
         .unwrap()
         .read_to_string(&mut stderr)
         .unwrap();
-    assert!(stderr.contains("\"event\":\"host_cycle_failed\""), "{stderr}");
+    assert!(
+        stderr.contains("\"event\":\"host_cycle_failed\""),
+        "{stderr}"
+    );
     assert!(stderr.contains("\"event\":\"daemon_stopped\""), "{stderr}");
     assert!(!repo.join("daemon.sock").exists());
     assert!(!command().arg("status").output().unwrap().status.success());

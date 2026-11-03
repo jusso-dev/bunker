@@ -25,8 +25,7 @@ pub struct Policy {
     /// Desired policy only. Automated boot/MCP restore probes are not implemented.
     pub restore_test_interval_seconds: u64,
     pub mass_delete_threshold: usize,
-    /// No successful backup for this long after the last one is a missed backup. Never earlier
-    /// than interval plus jitter; unset means interval plus jitter plus 60 seconds.
+    /// No successful backup for this long is a missed backup; unset uses interval+jitter+60s.
     pub missed_backup_seconds: Option<u64>,
 }
 impl Default for Policy {
@@ -109,7 +108,6 @@ impl Policy {
     /// Seconds after the last success at which a backup counts as missed.
     pub fn missed_backup_after(&self) -> u64 {
         let due = self.interval_seconds.saturating_add(self.jitter_seconds);
-        self.missed_backup_seconds
-            .map_or(due.saturating_add(60), |seconds| seconds.max(due))
+        self.missed_backup_seconds.unwrap_or(due.saturating_add(60))
     }
 }

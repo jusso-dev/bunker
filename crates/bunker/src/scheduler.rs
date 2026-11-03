@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::io::Write;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     thread,
@@ -81,16 +81,17 @@ pub fn detect(previous: &Manifest, current: &Manifest, threshold: usize) -> Vec<
     let before: BTreeSet<_> = previous.files.iter().map(|f| &f.path).collect();
     let after: BTreeSet<_> = current.files.iter().map(|f| &f.path).collect();
     // Unreadable/excluded paths are not evidence of deletion.
+    let unavailable = |path: &str| {
+        current.diagnostics.iter().any(|d| {
+            d.reason != "read_retry_succeeded"
+                && (d.path.is_empty()
+                    || path == d.path
+                    || path.starts_with(&format!("{}/", d.path)))
+        })
+    };
     let deleted = before
         .difference(&after)
-        .filter(|path| {
-            !current.diagnostics.iter().any(|d| {
-                d.reason != "read_retry_succeeded"
-                    && (d.path.is_empty()
-                        || path.as_str() == d.path
-                        || path.starts_with(&format!("{}/", d.path)))
-            })
-        })
+        .filter(|path| !unavailable(path))
         .count();
     let mut alerts = vec![];
     let mut add = |kind: &str, count| {
@@ -107,17 +108,15 @@ pub fn detect(previous: &Manifest, current: &Manifest, threshold: usize) -> Vec<
     if deleted > 0 && deleted >= threshold {
         add("mass_delete", deleted);
     }
+    let before_hashes: BTreeMap<_, _> = previous.files.iter().map(|f| (&f.path, &f.hash)).collect();
+    let after_hashes: BTreeMap<_, _> = current.files.iter().map(|f| (&f.path, &f.hash)).collect();
     let changed = |class: AgentChange| {
-        current
-            .files
-            .iter()
-            .filter(|f| {
-                agent_change(&f.path) == Some(class)
-                    && previous
-                        .files
-                        .iter()
-                        .find(|old| old.path == f.path)
-                        .is_none_or(|old| old.hash != f.hash)
+        before
+            .union(&after)
+            .filter(|path| {
+                agent_change(path) == Some(class)
+                    && before_hashes.get(*path) != after_hashes.get(*path)
+                    && (after.contains(*path) || !unavailable(path))
             })
             .count()
     };
@@ -161,13 +160,12 @@ pub fn next_due(from: u64, policy: &Policy) -> u64 {
 pub fn missed_backup_due(last_success: u64, recorded_for: Option<u64>, policy: &Policy) -> bool {
     last_success > 0
         && recorded_for != Some(last_success)
-        && now() > last_success.saturating_add(policy.missed_backup_after())
+        && now() >= last_success.saturating_add(policy.missed_backup_after())
 }
-fn note_missed_backup(state: &mut ScheduleState) -> bool {
-    let Some(policy) = &state.last_good_policy else {
-        return false;
-    };
-    if !missed_backup_due(state.last_success, state.missed_backup_for, policy) {
+fn note_missed_backup(state: &mut ScheduleState, policy: &Policy) -> bool {
+    if state.pending_missed_backup.is_some()
+        || !missed_backup_due(state.last_success, state.missed_backup_for, policy)
+    {
         return false;
     }
     state.pending_missed_backup = Some(state.last_success);
@@ -583,10 +581,16 @@ pub fn tick_with_key_source(
     state: &mut ScheduleState,
     force: bool,
 ) -> Result<()> {
-    if note_missed_backup(state) {
-        let _ = persist(&repo_path.join("schedule.json"), state);
-    }
     if !force && now() < state.retry_after {
+        let policy = Policy::load(policy_path)
+            .ok()
+            .or_else(|| state.last_good_policy.clone());
+        if policy
+            .as_ref()
+            .is_some_and(|policy| note_missed_backup(state, policy))
+        {
+            persist(&repo_path.join("schedule.json"), state)?;
+        }
         return Ok(());
     }
     match tick_inner(repo_path, key_source, workspace, policy_path, state, force) {
@@ -607,13 +611,13 @@ pub fn tick_with_key_source(
                 .last_good_policy
                 .as_ref()
                 .map_or(3600, |p| p.interval_seconds);
-            state.retry_after = now().saturating_add(retry_delay(state.failures, interval));
             if let Ok(repo) = Repository::open_with_key_source(repo_path, key_source) {
                 let _ = flush_missed_backup(&repo, state);
                 if !state.failure_audited {
                     state.failure_audited = repo.audit("backup_failed", serde_json::json!({"message":"scheduling step failed; retries use exponential backoff"})).is_ok();
                 }
             }
+            state.retry_after = now().saturating_add(retry_delay(state.failures, interval));
             let _ = persist(&repo_path.join("schedule.json"), state);
             Err(error)
         }
@@ -668,15 +672,20 @@ fn tick_inner(
         Err(error) => return Err(error.context("no valid policy available; will retry")),
     }
     let policy = state.last_good_policy.clone().context("no policy")?;
-    note_missed_backup(state);
-    if state.pending_missed_backup.is_some() {
+    for _ in 0..2 {
+        note_missed_backup(state, &policy);
+        if state.pending_missed_backup.is_none() {
+            break;
+        }
         // Durable before audit; an audit outage must not block the backup itself.
         persist(&state_path, state)?;
-        if let Ok(repo) = Repository::open_with_key_source(repo_path, key_source) {
-            if flush_missed_backup(&repo, state).is_ok() {
-                persist(&state_path, state)?;
-            }
+        let Ok(repo) = Repository::open_with_key_source(repo_path, key_source) else {
+            break;
+        };
+        if flush_missed_backup(&repo, state).is_err() {
+            break;
         }
+        persist(&state_path, state)?;
     }
     if state.pending_detection.is_some() {
         // Re-persist before retrying detection if the previous state write failed.
@@ -961,7 +970,7 @@ mod schedule_tests {
     }
 
     #[test]
-    fn missed_backup_threshold_honours_policy_and_never_precedes_due_time() {
+    fn missed_backup_threshold_honours_policy_including_short_thresholds() {
         let mut policy = Policy {
             interval_seconds: 600,
             jitter_seconds: 60,
@@ -971,7 +980,7 @@ mod schedule_tests {
         policy.missed_backup_seconds = Some(5400);
         assert_eq!(policy.missed_backup_after(), 5400);
         policy.missed_backup_seconds = Some(60);
-        assert_eq!(policy.missed_backup_after(), 660);
+        assert_eq!(policy.missed_backup_after(), 60);
         policy.missed_backup_seconds = Some(59);
         assert!(policy.validate().is_err());
         let recent = now() - 100;
@@ -1007,24 +1016,180 @@ mod schedule_tests {
             ..ScheduleState::default()
         };
         // 1000 seconds since success is overdue for the interval but within the policy threshold.
-        tick_with_key_source(&repo_path, &key, &work, Some(&policy_path), &mut state, false)
-            .unwrap();
+        tick_with_key_source(
+            &repo_path,
+            &key,
+            &work,
+            Some(&policy_path),
+            &mut state,
+            false,
+        )
+        .unwrap();
         assert!(state.missed_backup_for.is_none());
         let last = now() - 2000;
         state.last_success = last;
-        tick_with_key_source(&repo_path, &key, &work, Some(&policy_path), &mut state, false)
-            .unwrap();
+        tick_with_key_source(
+            &repo_path,
+            &key,
+            &work,
+            Some(&policy_path),
+            &mut state,
+            false,
+        )
+        .unwrap();
         assert_eq!(state.missed_backup_for, Some(last));
         let saved: ScheduleState =
             serde_json::from_slice(&fs::read(repo_path.join("schedule.json")).unwrap()).unwrap();
         assert_eq!(saved.missed_backup_for, Some(last));
         assert!(saved.pending_missed_backup.is_none());
-        tick_with_key_source(&repo_path, &key, &work, Some(&policy_path), &mut state, false)
-            .unwrap();
+        tick_with_key_source(
+            &repo_path,
+            &key,
+            &work,
+            Some(&policy_path),
+            &mut state,
+            false,
+        )
+        .unwrap();
         let repo = Repository::open(&repo_path, "missed-fixture").unwrap();
         let recorded = repo.audit_details("missed_backup").unwrap();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0]["last_success"], last);
+    }
+
+    #[test]
+    fn pending_miss_survives_a_later_overdue_success_until_audit_recovers() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("repo");
+        drop(Repository::init(&repo_path, "missed-fixture").unwrap());
+        let work = temp.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let older = now() - 4000;
+        let later = now() - 2000;
+        let policy = Policy {
+            interval_seconds: 600,
+            jitter_seconds: 0,
+            missed_backup_seconds: Some(600),
+            ..Policy::default()
+        };
+        let mut state = ScheduleState {
+            workspace: Some(work.canonicalize().unwrap()),
+            last_success: later,
+            next_run: now() + 3600,
+            pending_missed_backup: Some(older),
+            missed_backup_for: Some(older),
+            last_good_policy: Some(policy.clone()),
+            ..ScheduleState::default()
+        };
+        assert!(!note_missed_backup(&mut state, &policy));
+        assert_eq!(state.pending_missed_backup, Some(older));
+        let path = temp.path().join("policy.toml");
+        fs::write(&path, toml::to_string(&policy).unwrap()).unwrap();
+        let key = KeySource::passphrase("missed-fixture");
+        tick_with_key_source(&repo_path, &key, &work, Some(&path), &mut state, false).unwrap();
+        assert_eq!(state.missed_backup_for, Some(later));
+        assert!(state.pending_missed_backup.is_none());
+        let repo = Repository::open(&repo_path, "missed-fixture").unwrap();
+        let mut recorded = repo
+            .audit_details("missed_backup")
+            .unwrap()
+            .into_iter()
+            .map(|detail| detail["last_success"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        recorded.sort_unstable();
+        assert_eq!(recorded, [older, later]);
+    }
+
+    #[test]
+    fn threshold_reload_precedes_miss_detection_even_during_backoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("repo");
+        drop(Repository::init(&repo_path, "missed-fixture").unwrap());
+        let work = temp.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let path = temp.path().join("policy.toml");
+        let key = KeySource::passphrase("missed-fixture");
+        for backoff in [false, true] {
+            let last = now() - 1000;
+            let mut state = ScheduleState {
+                workspace: Some(work.canonicalize().unwrap()),
+                last_success: last,
+                next_run: now() + 3600,
+                retry_after: if backoff { now() + 3600 } else { 0 },
+                last_good_policy: Some(Policy {
+                    interval_seconds: 600,
+                    jitter_seconds: 0,
+                    missed_backup_seconds: Some(600),
+                    ..Policy::default()
+                }),
+                ..ScheduleState::default()
+            };
+            fs::write(
+                &path,
+                "interval_seconds = 600\njitter_seconds = 0\nmissed_backup_seconds = 1800\n",
+            )
+            .unwrap();
+            tick_with_key_source(&repo_path, &key, &work, Some(&path), &mut state, false).unwrap();
+            assert!(
+                state.missed_backup_for.is_none(),
+                "used the previous threshold"
+            );
+            fs::write(
+                &path,
+                "interval_seconds = 600\njitter_seconds = 0\nmissed_backup_seconds = 600\n",
+            )
+            .unwrap();
+            tick_with_key_source(&repo_path, &key, &work, Some(&path), &mut state, false).unwrap();
+            assert_eq!(state.missed_backup_for, Some(last));
+            let saved = load_schedule_with_key_source(&repo_path, &key).unwrap();
+            assert_eq!(saved.missed_backup_for, Some(last));
+        }
+    }
+
+    fn detects_deleted_agent_file(path: &str, kind: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::init(&temp.path().join("repo"), "detect-fixture").unwrap();
+        let work = temp.path().join("work");
+        fs::create_dir_all(work.join(Path::new(path).parent().unwrap())).unwrap();
+        fs::write(work.join(path), "{}").unwrap();
+        let policy = Policy::default();
+        let before = repo
+            .snapshot(&work, &policy, None, None, "fixture")
+            .unwrap();
+        let excluded = repo
+            .snapshot(
+                &work,
+                &Policy {
+                    exclusions: vec![path.into()],
+                    ..policy.clone()
+                },
+                None,
+                None,
+                "fixture",
+            )
+            .unwrap();
+        assert!(
+            detect(&before, &excluded, 20).is_empty(),
+            "exclusion is not a deletion"
+        );
+        fs::remove_file(work.join(path)).unwrap();
+        let after = repo
+            .snapshot(&work, &policy, None, None, "fixture")
+            .unwrap();
+        let alerts = detect(&before, &after, 20);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].kind, kind);
+        assert_eq!(alerts[0].count, 1);
+    }
+
+    #[test]
+    fn mcp_config_deletion_is_detected() {
+        detects_deleted_agent_file(".cursor/mcp.json", "mcp_config_changed");
+    }
+
+    #[test]
+    fn skill_deletion_is_detected() {
+        detects_deleted_agent_file(".claude/skills/review/SKILL.md", "skill_changed");
     }
 
     #[test]
@@ -1037,7 +1202,9 @@ mod schedule_tests {
         fs::write(work.join(".claude/skills/review/SKILL.md"), "one").unwrap();
         fs::write(work.join("notes.txt"), "one").unwrap();
         let policy = Policy::default();
-        let base = repo.snapshot(&work, &policy, None, None, "fixture").unwrap();
+        let base = repo
+            .snapshot(&work, &policy, None, None, "fixture")
+            .unwrap();
         let kinds = |current: &Manifest| {
             detect(&base, current, 20)
                 .into_iter()
@@ -1045,18 +1212,27 @@ mod schedule_tests {
                 .collect::<Vec<_>>()
         };
         fs::write(work.join(".mcp.json"), r#"{"mcpServers":{"x":{}}}"#).unwrap();
-        let mcp = repo.snapshot(&work, &policy, None, None, "fixture").unwrap();
+        let mcp = repo
+            .snapshot(&work, &policy, None, None, "fixture")
+            .unwrap();
         assert_eq!(kinds(&mcp), vec![("mcp_config_changed".into(), 1)]);
         fs::write(work.join(".mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
         fs::write(work.join(".claude/skills/review/SKILL.md"), "two").unwrap();
         fs::write(work.join("AGENTS.md"), "new").unwrap();
-        let skill = repo.snapshot(&work, &policy, None, None, "fixture").unwrap();
+        let skill = repo
+            .snapshot(&work, &policy, None, None, "fixture")
+            .unwrap();
         assert_eq!(kinds(&skill), vec![("skill_changed".into(), 2)]);
         fs::write(work.join("notes.txt"), "two").unwrap();
-        let plain = repo.snapshot(&work, &policy, None, None, "fixture").unwrap();
+        let plain = repo
+            .snapshot(&work, &policy, None, None, "fixture")
+            .unwrap();
         assert_eq!(detect(&skill, &plain, 20).len(), 0);
         assert_eq!(agent_change("skills/x/SKILL.md"), Some(AgentChange::Skill));
-        assert_eq!(agent_change(".cursor/mcp.json"), Some(AgentChange::McpConfig));
+        assert_eq!(
+            agent_change(".cursor/mcp.json"),
+            Some(AgentChange::McpConfig)
+        );
         assert_eq!(agent_change("src/main.rs"), None);
     }
 }
