@@ -12,7 +12,7 @@ This source-install command also works in PowerShell with a configured Rust tool
 
 ## Package candidates
 
-The manually dispatched `Unsigned package candidates` workflow builds Linux x86-64 GNU, macOS arm64/x86-64, and Windows x86-64 MSVC archives. Each archive includes the binary, licence, build record and a CycloneDX Cargo source-dependency inventory. That inventory includes build/dev dependencies and is not a precise linked-binary SBOM. GitHub artifact provenance is requested by the workflow; verify that the attestation step actually succeeded for the downloaded candidate. Provenance is not Authenticode, Apple signing or notarisation.
+The manually dispatched `Attested package candidates` workflow builds Linux x86-64 GNU, macOS arm64/x86-64, and Windows x86-64 MSVC archives. Each archive includes the binary, checksum-verifying `install.py`, licence, build record and a CycloneDX Cargo source-dependency inventory. That inventory includes build/dev dependencies and is not a precise linked-binary SBOM. The workflow requests GitHub build provenance and an SBOM attestation and uses keyless cosign `sign-blob` for each archive and checksum (bundles end in `.sigstore.json`); verify that the attestation step actually succeeded for the downloaded candidate. Provenance is not Authenticode, Apple signing or notarisation.
 
 Build a candidate locally with `cargo build --locked --release --package bunker --target TARGET`, then `python3 packaging/scripts/package.py --target TARGET --output /tmp/bunker-packages`. The target must be installed in Rust. No signing or network publication occurs.
 
@@ -23,6 +23,36 @@ python3 packaging/scripts/install.py --archive "$ARCHIVE" --sha256 "$EXPECTED_SH
 ```
 
 PowerShell uses `python packaging/scripts/install.py --archive $Archive --sha256 $ExpectedSha256 --prefix "$env:LOCALAPPDATA\Bunker"`. Add the resulting `bin` directory to `PATH`. The installer verifies SHA-256 before reading the binary member, rejects symlinks/duplicate members, and never extracts arbitrary archive paths. It replaces an existing installed binary; stop running services first. It does not configure services or install a trusted publisher certificate.
+
+For a published release containing `install.py`, macOS/Linux supports this one-line
+bootstrap (replace the version in both places with the reviewed release):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jusso-dev/bunker/v0.1.0/packaging/scripts/bootstrap.py | python3 - --version 0.1.0 --prefix "$HOME/.local"
+```
+
+The initial bootstrap code must itself come from a trusted, reviewed tag. To inspect
+it first, download it to a file before running it. It selects Linux x86-64 GNU or
+macOS arm64/x86-64, downloads the release archive and its `.sha256`, checks the exact
+archive name and digest, runs `gh attestation verify --repo jusso-dev/bunker` when
+`gh` is present, then delegates to the archive's verified `install.py`. A failed
+attestation stops installation. Without `gh`, it prints an explicit warning and
+checks only SHA-256; use a trusted independent checksum in that case. Python 3 and
+CA trust roots are prerequisites. These commands require a published release;
+adding the workflow does not publish one.
+
+Windows x64 has the equivalent bootstrap (Python 3 and PowerShell required):
+
+```powershell
+./packaging/scripts/install.ps1 -Version 0.1.0 -Prefix "$env:LOCALAPPDATA\Bunker"
+```
+
+Run the reviewed script from this checkout or the matching trusted source tag.
+Both bootstraps accept an explicit release mirror (`--release-base` / `-ReleaseBase`)
+or a local release directory for offline verification. They never extract arbitrary
+archive paths or install services. The local fixture suite covers archive and
+checksum failures, attestation failures, and PowerShell delegation. Native Windows
+installation and hosted keyless signing still require release-run evidence.
 
 `packaging/scripts/package-linux.sh deb|rpm VERSION BINARY OUTPUT_DIRECTORY` invokes separately installed `fpm` and native packaging tooling. The WiX v4 template `packaging/windows/bunker.wxs` can build an unsigned MSI using `wix build -arch x64 -d Version=0.1.0 -d BinaryPath=ABSOLUTE_BINARY_PATH packaging/windows/bunker.wxs`. Homebrew/winget files under `packaging/manifests/` are placeholder templates, not installable manifests. Native package builds and signed distribution remain unverified.
 

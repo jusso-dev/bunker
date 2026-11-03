@@ -57,6 +57,7 @@ def main():
         shutil.copy2(binary, stage / binary_name)
         (stage / binary_name).chmod(0o755)
         shutil.copy2('LICENSE', stage / 'LICENSE')
+        shutil.copy2('packaging/scripts/install.py', stage / 'install.py')
         shutil.copy2(sbom_path, stage / 'sbom.cdx.json')
         (stage / 'BUILD.txt').write_text(
             f'Unsigned development package\nTarget: {args.target}\n'

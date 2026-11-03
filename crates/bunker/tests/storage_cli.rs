@@ -24,9 +24,11 @@ fn setup() -> (tempfile::TempDir, std::path::PathBuf) {
     fs::create_dir(&work).unwrap();
     fs::write(work.join("a.txt"), "fixture").unwrap();
     assert!(bunker(&repo, &["init"]).status.success());
-    assert!(bunker(&repo, &["snapshot", "--workspace", work.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        bunker(&repo, &["snapshot", "--workspace", work.to_str().unwrap()])
+            .status
+            .success()
+    );
     (dir, repo)
 }
 fn write_config(dir: &Path, service: &str, options: &[(&str, &str)]) -> std::path::PathBuf {
@@ -71,7 +73,10 @@ fn local_replication_warns_about_missing_immutability_and_records_no_region() {
             ("upload_bytes_per_second", "1048576"),
         ],
     );
-    let output = bunker(&repo, &["replicate", "--storage", storage.to_str().unwrap()]);
+    let output = bunker(
+        &repo,
+        &["replicate", "--storage", storage.to_str().unwrap()],
+    );
     assert!(output.status.success());
     let warnings = warnings(&output);
     assert_eq!(warnings.len(), 1);
@@ -106,7 +111,10 @@ fn consumer_replication_warns_before_any_provider_work() {
     )
     .unwrap();
     // Missing --report fails before network or state access, after the warning.
-    let output = bunker(&repo, &["replicate", "--storage", storage.to_str().unwrap()]);
+    let output = bunker(
+        &repo,
+        &["replicate", "--storage", storage.to_str().unwrap()],
+    );
     assert!(!output.status.success());
     let warnings = warnings(&output);
     assert_eq!(warnings.len(), 1);
@@ -127,7 +135,10 @@ fn failed_s3_replication_never_echoes_configured_credentials() {
             ("region", "ap-southeast-2"),
         ],
     );
-    let output = bunker(&repo, &["replicate", "--storage", storage.to_str().unwrap()]);
+    let output = bunker(
+        &repo,
+        &["replicate", "--storage", storage.to_str().unwrap()],
+    );
     assert!(!output.status.success());
     assert!(warnings(&output).is_empty());
     let mut checked = vec![output.stdout, output.stderr];

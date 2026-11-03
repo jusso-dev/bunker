@@ -262,6 +262,32 @@ retries. Resume/rebind deliberately after diagnosing the account state. Access
 revocation, expired consent, MFA/conditional-access policy, and app registration
 changes can require private operator reauthorization.
 
+## OS keychain evaluation
+
+OAuth refresh secrets currently remain in the owner-only `credentials.json` file;
+access tokens remain memory-only. Consumer/local replication emits an explicit
+stderr warning that object lock and immutable retention are unsupported.
+
+Keyring **3.6.3** was evaluated for this acceptance work. `apple-native` and
+`windows-native` avoid D-Bus, but Linux `linux-native` uses kernel keyutils and
+reports `CredentialPersistence::UntilReboot`: even its persistent keyring loses
+secrets on reboot. Using it as the only saved rotation could lose the only valid
+refresh token while leaving a durable state-file reference. The v3 persistent
+Linux backends additionally require Secret Service (D-Bus), which is not generally
+available to a headless service. A mock backend cannot establish native-store
+crash durability or account/session availability.
+
+No partial migration or implicit fallback was added. A safe implementation needs
+a reviewed platform-specific persistence policy, versioned references bound to the
+existing provider/folder/client binding, migration of existing file secrets, and
+crash/failure tests spanning keychain writes and the fsynced refresh-pending guard.
+An inaccessible existing reference must fail closed rather than fall back to a
+stale environment token; an explicitly selected, clearly logged file fallback
+must not create two competing token authorities. The existing file transaction,
+exclusive state lock and uncertainty/rebind semantics remain in force. Native
+keychain storage is an outstanding acceptance gap, including native Windows ACL
+and unattended service-account validation.
+
 ## Bounds and validation
 
 - Nonempty encrypted object: at most 64 MiB; recovery additionally enforces the

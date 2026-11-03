@@ -102,7 +102,10 @@ impl StorageConfig {
     }
     /// Operator plus Bunker transfer limits, for replication uploads.
     pub fn store(&self) -> Result<TransferStore> {
-        Ok(TransferStore::new(self.operator()?, self.transfer_limits()?))
+        Ok(TransferStore::new(
+            self.operator()?,
+            self.transfer_limits()?,
+        ))
     }
     /// Configured provider region, recorded in replication output. Local targets
     /// have no region. Azure accepts an informational `region` option.
@@ -219,7 +222,13 @@ impl crate::checkpoint::RemoteStore for TransferStore {
         if !wait.is_zero() {
             tokio::time::sleep(wait).await;
         }
-        copy_verified_with(&self.operator, path, bytes, self.limits.multipart_chunk_bytes).await
+        copy_verified_with(
+            &self.operator,
+            path,
+            bytes,
+            self.limits.multipart_chunk_bytes,
+        )
+        .await
     }
 }
 fn validate_endpoint(endpoint: &str) -> Result<()> {
@@ -882,6 +891,42 @@ mod tests {
         assert!(config("local", &[("upload_bytes_per_second", "1")])
             .operator()
             .is_err());
+    }
+    #[test]
+    fn transfer_options_load_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("storage.toml");
+        fs::write(
+            &path,
+            r#"service = "s3"
+[options]
+region = "ap-southeast-2"
+upload_bytes_per_second = "1048576"
+multipart_chunk_bytes = "8388608"
+"#,
+        )
+        .unwrap();
+        let loaded = StorageConfig::load(&path).unwrap();
+        assert_eq!(loaded.region(), Some("ap-southeast-2"));
+        assert_eq!(
+            loaded.transfer_limits().unwrap(),
+            TransferLimits {
+                upload_bytes_per_second: Some(1048576),
+                multipart_chunk_bytes: Some(8388608),
+            }
+        );
+        fs::write(
+            &path,
+            r#"service = "s3"
+[options]
+upload_bytes_per_second = 1048576
+"#,
+        )
+        .unwrap();
+        assert!(
+            StorageConfig::load(&path).is_err(),
+            "options are strings, not TOML numbers"
+        );
     }
     #[test]
     fn upload_budget_spaces_object_starts() {

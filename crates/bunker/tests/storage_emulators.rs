@@ -15,13 +15,12 @@ use bunker::{
     storage::{StorageConfig, TransferStore},
 };
 use chrono::{Duration, Utc};
+use std::{collections::BTreeMap, fs, io::Read, path::Path, sync::Arc};
+
+#[cfg(target_os = "linux")]
 use std::{
-    collections::BTreeMap,
-    fs,
-    io::Read,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Output},
-    sync::Arc,
 };
 
 const PASSPHRASE: &str = "emulator-fixture-passphrase";
@@ -115,7 +114,10 @@ fn s3_config(bucket: &str, root: &str, immutable: bool, extra: &[(&str, &str)]) 
         options,
         credential_env: BTreeMap::from([
             ("access_key_id".into(), "BUNKER_TEST_S3_ACCESS_KEY".into()),
-            ("secret_access_key".into(), "BUNKER_TEST_S3_SECRET_KEY".into()),
+            (
+                "secret_access_key".into(),
+                "BUNKER_TEST_S3_SECRET_KEY".into(),
+            ),
         ]),
         immutable,
     }
@@ -157,6 +159,7 @@ fn assert_no_sentinel(label: &str, bytes: &[u8]) {
         );
     }
 }
+#[cfg(target_os = "linux")]
 fn assert_tree_has_no_sentinel(root: &Path) {
     for entry in walkdir::WalkDir::new(root) {
         let entry = entry.unwrap();
@@ -336,8 +339,8 @@ fn minio_object_lock_refuses_delete_and_overwrite_before_retention_ends() {
     let root = unique_root();
     let bucket = var("BUNKER_TEST_S3_LOCK_BUCKET");
     let config = s3_config(&bucket, &root, true, &[]);
-    let until = chrono::DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap()
-        + Duration::days(1);
+    let until =
+        chrono::DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap() + Duration::days(1);
     let resolve = |name: &str| std::env::var(name).ok();
     let primary = ProtectedBackend::with_transport(
         &config,
@@ -382,9 +385,13 @@ fn minio_object_lock_refuses_delete_and_overwrite_before_retention_ends() {
                 .version(&proof.version)
                 .await
                 .expect_err("locked version deletion must fail");
-            assert_eq!(
-                error.kind(),
-                opendal::ErrorKind::PermissionDenied,
+            // MinIO reports locked-version deletion as InvalidRequest (HTTP 400),
+            // while AWS reports AccessDenied (HTTP 403). Require an explicit lock
+            // refusal, not an arbitrary transport or configuration failure.
+            assert!(
+                error.kind() == opendal::ErrorKind::PermissionDenied
+                    || (error.kind() == opendal::ErrorKind::Unexpected
+                        && error.to_string().contains("Object is WORM protected")),
                 "unexpected delete failure: {error}"
             );
             assert!(attacker
@@ -428,6 +435,7 @@ fn minio_object_lock_refuses_delete_and_overwrite_before_retention_ends() {
     fixture.assert_recovered(&destination);
 }
 
+#[cfg(target_os = "linux")]
 fn bunker(repo: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
     let output = Command::new(env!("CARGO_BIN_EXE_bunker"))
         .arg("--repo")
@@ -449,13 +457,16 @@ fn bunker(repo: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
     );
     output
 }
+#[cfg(target_os = "linux")]
 fn json(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
+#[cfg(target_os = "linux")]
 struct CliFixture {
     dir: tempfile::TempDir,
     repo: PathBuf,
 }
+#[cfg(target_os = "linux")]
 impl CliFixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -478,6 +489,7 @@ impl CliFixture {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cli_protected_minio_replication_records_region_and_keeps_credentials_private() {
     if !enabled("BUNKER_TEST_S3_ENDPOINT") {
@@ -540,6 +552,9 @@ fn cli_protected_minio_replication_records_region_and_keeps_credentials_private(
 fn cli_plain_replication_records_region_and_keeps_credentials_private() {
     let s3 = enabled("BUNKER_TEST_S3_ENDPOINT");
     let azure = enabled("BUNKER_TEST_AZURITE_ENDPOINT");
+    if !s3 && !azure {
+        return;
+    }
     let fixture = CliFixture::new();
     let mut targets = vec![];
     if s3 {
