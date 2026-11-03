@@ -42,6 +42,9 @@ pub use maintenance::{MaintenancePlan, MaintenanceReport};
 #[path = "repository_setup.rs"]
 mod setup;
 pub use setup::{SetupScope, SetupSnapshot};
+#[path = "repository_session.rs"]
+mod session;
+pub use session::{SessionRollback, SESSION_END, SESSION_ROLLBACK, SESSION_START};
 
 #[path = "repository_git.rs"]
 mod git;

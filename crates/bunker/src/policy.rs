@@ -22,7 +22,8 @@ pub struct Policy {
     pub immutable: bool,
     pub region: Option<String>,
     pub dr_repository: Option<String>,
-    /// Desired policy only. Automated boot/MCP restore probes are not implemented.
+    /// Interval between scheduled boot/MCP restore probes. They run only when a
+    /// trusted probe configuration (`daemon --probe-config` or host mode) is supplied.
     pub restore_test_interval_seconds: u64,
     pub mass_delete_threshold: usize,
 }

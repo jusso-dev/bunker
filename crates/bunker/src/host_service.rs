@@ -392,7 +392,7 @@ impl<T: Transport> HostClient<T> {
 
     /// MCP/CLI adapter: creates a remote human-review request, never approves or executes it.
     /// Only single-file or entire-snapshot-in-place scope is supported. A full snapshot is sent
-    /// as workspace; session remapping and deletes are intentionally not exposed.
+    /// as workspace, a derived session rollback as session; deletes are intentionally not exposed.
     /// Display local_restore_preview after creation to review this exact frozen diff locally.
     pub fn request_restore(
         &mut self,
@@ -448,7 +448,7 @@ impl<T: Transport> HostClient<T> {
         let value = self.post(
             "/restores",
             &json!({"snapshotId":self.identity.snapshot_id(snapshot)?,
-            "kind":if selection.is_some(){"file"}else{"workspace"},
+            "kind":restore_kind(&manifest, selection),
             "manifestDigest":frozen.manifest_digest,"diffDigest":diff_digest,"changes":changes}),
         )?;
         let created: CreatedRequest = serde_json::from_value(value)
@@ -590,6 +590,16 @@ impl<T: Transport> HostClient<T> {
         Ok(())
     }
 }
+/// A derived session rollback is reviewed as `session` unless narrowed to one file.
+fn restore_kind(manifest: &Manifest, selection: Option<&str>) -> &'static str {
+    if selection.is_some() {
+        "file"
+    } else if manifest.trigger == crate::repository::SESSION_ROLLBACK {
+        "session"
+    } else {
+        "workspace"
+    }
+}
 fn metadata_changes(repo: &impl RestoreRepository, frozen: &FrozenPlan) -> Result<Vec<Value>> {
     let mut changes = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -668,11 +678,10 @@ fn validate_remote(
                     .snapshot_id(&saved.frozen.plan.snapshot)?
                     .to_string()
             && body["kind"]
-                == if saved.frozen.selection.is_some() {
-                    "file"
-                } else {
-                    "workspace"
-                }
+                == restore_kind(
+                    &repo.manifest(&saved.frozen.plan.snapshot)?,
+                    saved.frozen.selection.as_deref(),
+                )
             && body["changes"] == serde_json::to_value(metadata_changes(repo, &saved.frozen)?)?,
         "remote restore plan binding mismatch"
     );
