@@ -130,6 +130,11 @@ impl ExclusionPolicy {
             }
         }
         for pair in parts.windows(2) {
+            // JetBrains Copilot plugin OAuth stores.
+            if pair[0] == "github-copilot" && matches!(pair[1].as_str(), "apps.json" | "hosts.json")
+            {
+                return Ok(Some(ExclusionReason::Credentials));
+            }
             if is_agent_root(&pair[0])
                 && (matches!(
                     pair[1].as_str(),
@@ -251,6 +256,7 @@ pub fn agent_config(path: &Path) -> bool {
         ".cursor/mcp.json",
         ".cursor/settings.json",
         ".cursor/hooks.json",
+        ".cursor/environment.json",
         ".codex/config.toml",
         ".agents/config.toml",
         ".copilot/config.json",
@@ -263,6 +269,7 @@ pub fn agent_config(path: &Path) -> bool {
         "cursor/user/mcp.json",
         "code/user/settings.json",
         "code/user/mcp.json",
+        "github-copilot/intellij/mcp.json",
         "kiro/user/settings.json",
         "kiro/user/mcp.json",
     ]

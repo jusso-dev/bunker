@@ -64,14 +64,17 @@ assert!(!sanitized.secret_references.is_empty());
 All platforms scan explicitly supplied home and project roots. Linux editor
 settings use `$XDG_CONFIG_HOME` (explicit `config_dir`) or `home/.config`; macOS
 uses `home/Library/Application Support`; Windows uses explicit `app_data` or
-`home/AppData/Roaming`. These are path construction rules, not environment reads.
+`home/AppData/Roaming`. JetBrains Copilot configuration lives under the Linux
+editor base, `home/.config` on macOS, and `home/AppData/Local` on Windows; its
+`apps.json`/`hosts.json` OAuth stores are hard credential exclusions. These are
+path construction rules, not environment reads.
 
 | Agent | Home and project paths | Editor configuration |
 | --- | --- | --- |
 | Claude Code | `.claude/{settings.json,settings.local.json,CLAUDE.md,mcp.json,skills/,commands/,rules/,agents/,hooks/,memory/}`; home `.claude.json`, `CLAUDE.md`; project `CLAUDE.md`, `.mcp.json` | None |
-| Cursor | `.cursor/{mcp.json,settings.json,hooks.json,rules/,skills/,agents/,hooks/}`; project `.cursorrules`, `AGENTS.md` | `Cursor/User/{settings.json,mcp.json}` |
+| Cursor | `.cursor/{mcp.json,settings.json,hooks.json,environment.json,rules/,skills/,agents/,hooks/}` (`environment.json` is the background-agent configuration); project `.cursorrules`, `AGENTS.md` | `Cursor/User/{settings.json,mcp.json}` |
 | Codex | `.codex/{config.toml,AGENTS.md,AGENTS.override.md,prompts/,skills/,rules/,agents/,hooks/,memory/}`; project `AGENTS.md`, `AGENTS.override.md`, corresponding `.agents/` paths | None |
-| GitHub Copilot | `.copilot/{config.json,mcp-config.json,copilot-instructions.md,skills/,agents/,hooks/}`; project `.github/{copilot-instructions.md,instructions/,prompts/,chatmodes/,agents/,skills/,hooks/}`, `.vscode/{mcp.json,settings.json}` | `Code/User/{settings.json,mcp.json}` |
+| GitHub Copilot | `.copilot/{config.json,mcp-config.json,copilot-instructions.md,skills/,agents/,hooks/}`; project `.github/{copilot-instructions.md,instructions/,prompts/,chatmodes/,agents/,skills/,hooks/}`, `.vscode/{mcp.json,settings.json}` | `Code/User/{settings.json,mcp.json,prompts/}`; JetBrains `github-copilot/intellij/{mcp.json,global-copilot-instructions.md,global-git-commit-instructions.md}` |
 | Kiro | `.kiro/{settings/mcp.json,settings/settings.json,steering/,specs/,hooks/,agents/,skills/}` | `Kiro/User/{settings.json,mcp.json}` |
 
 Only listed files/directories are candidates. Nested safe files under listed
@@ -147,14 +150,16 @@ snapshot triggering, missed-run alerts and sandbox boot/MCP probes belong to
 core, not this crate. No hook commands are executed by discovery.
 
 Version-specific Kiro/Copilot lifecycle hooks are not asserted without a verified
-runtime capability probe. JetBrains version/profile-specific Copilot stores,
+runtime capability probe. JetBrains IDE-specific (non-`intellij`) Copilot stores,
 VS Code/Cursor profiles, remote/managed policy stores, custom `CODEX_HOME`,
 custom agent directories, project roots inferred from history, and Claude
 project-history memory stores are not scanned. An administrator can supply
 explicit alternate roots or a custom adapter. JSONC comments/trailing commas
 are rejected rather than repaired; some editor configurations therefore need
 conversion to strict JSON before backup. Included org-managed plain files use
-the same read-only policy; inaccessible ones report an error.
+the same read-only policy. A permission-denied (for example org-managed) file or
+directory is reported in `excluded` with reason `unreadable`; it never fails
+discovery of other candidates or agents.
 
 Secret detection is conservative, not a proof that arbitrary free-form documents
 contain no secret or customer data. Unknown prose credentials cannot reliably be

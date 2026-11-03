@@ -80,6 +80,15 @@ impl DiscoveryContext {
             workspace_roots,
         }
     }
+    /// JetBrains Copilot plugin configuration (`github-copilot/`): XDG config on
+    /// Linux, `~/.config` on macOS, and the local (not roaming) app data on Windows.
+    fn jetbrains_copilot_base(&self) -> PathBuf {
+        match self.platform {
+            Platform::Linux => self.editor_base(),
+            Platform::MacOs => self.home.join(".config"),
+            Platform::Windows => self.home.join("AppData/Local"),
+        }
+    }
     fn editor_base(&self) -> PathBuf {
         match self.platform {
             Platform::Linux => self
@@ -95,7 +104,7 @@ impl DiscoveryContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemCategory {
     McpConfig,
@@ -164,6 +173,16 @@ pub struct DiscoveryResult {
     /// Excluded setup candidates, without reading their contents.
     #[serde(default)]
     pub excluded: Vec<DiscoveryExclusion>,
+}
+impl DiscoveryResult {
+    /// Items grouped by category (type), in category then path order.
+    pub fn by_category(&self) -> BTreeMap<ItemCategory, Vec<&DiscoveredItem>> {
+        let mut groups: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for item in &self.items {
+            groups.entry(item.category).or_default().push(item);
+        }
+        groups
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiscoveryExclusion {
@@ -295,6 +314,8 @@ fn agent_tree(candidates: &mut Vec<Candidate>, root: &Path, prefix: &str, agent:
                 ("mcp.json", McpConfig),
                 ("settings.json", Settings),
                 ("hooks.json", Hook),
+                // Background-agent environment (install/start commands, snapshot).
+                ("environment.json", Settings),
             ],
             vec![
                 ("rules", Rule),
@@ -441,6 +462,19 @@ impl DiscoveryAdapter for BuiltinAdapter {
                 false,
             );
         }
+        if self.0 == AgentId::GitHubCopilot {
+            // User-level prompt/instruction/chat-mode files shared across workspaces.
+            add(&mut candidates, &editor, "Code/User/prompts", Skill, true);
+            // Only plugin configuration; apps.json/hosts.json hold OAuth tokens.
+            let jetbrains = context.jetbrains_copilot_base();
+            for (path, kind) in [
+                ("github-copilot/intellij/mcp.json", McpConfig),
+                ("github-copilot/intellij/global-copilot-instructions.md", Rule),
+                ("github-copilot/intellij/global-git-commit-instructions.md", Rule),
+            ] {
+                add(&mut candidates, &jetbrains, path, kind, false);
+            }
+        }
         for workspace in &context.workspace_roots {
             agent_tree(&mut candidates, workspace, prefix, self.0);
             match self.0 {
@@ -572,11 +606,11 @@ impl DiscoveryAdapter for BuiltinAdapter {
                 })();
                 let directory = match directory {
                     Ok(directory) => directory,
-                    Err(_) => {
+                    Err(error) => {
                         excluded.push(DiscoveryExclusion {
                             root: candidate.root.clone(),
                             relative_path: candidate.relative.clone(),
-                            reason: ExclusionReason::UnsafePath,
+                            reason: failure_reason(&error),
                         });
                         continue;
                     }
@@ -600,7 +634,7 @@ impl DiscoveryAdapter for BuiltinAdapter {
                     });
                 }
                 for relative in paths {
-                    if collect_item(
+                    if let Err(error) = collect_item(
                         &mut items,
                         &mut seen,
                         self.0,
@@ -608,34 +642,29 @@ impl DiscoveryAdapter for BuiltinAdapter {
                         &relative,
                         &exclusions,
                         policy,
-                    )
-                    .is_err()
-                    {
+                    ) {
                         excluded.push(DiscoveryExclusion {
                             root: candidate.root.clone(),
                             relative_path: relative.clone(),
-                            reason: ExclusionReason::UnsafePath,
+                            reason: failure_reason(&error),
                         });
                     }
                 }
-            } else {
-                if collect_item(
-                    &mut items,
-                    &mut seen,
-                    self.0,
-                    &candidate,
-                    &candidate.relative,
-                    &exclusions,
-                    policy,
-                )
-                .is_err()
-                {
-                    excluded.push(DiscoveryExclusion {
-                        root: candidate.root.clone(),
-                        relative_path: candidate.relative.clone(),
-                        reason: ExclusionReason::UnsafePath,
-                    });
-                }
+            } else if let Err(error) = collect_item(
+                &mut items,
+                &mut seen,
+                self.0,
+                &candidate,
+                &candidate.relative,
+                &exclusions,
+                policy,
+            ) {
+                // Org-managed or permission-restricted files are reported, never fatal.
+                excluded.push(DiscoveryExclusion {
+                    root: candidate.root.clone(),
+                    relative_path: candidate.relative.clone(),
+                    reason: failure_reason(&error),
+                });
             }
         }
         items.sort_by(|a, b| (&a.root, &a.relative_path).cmp(&(&b.root, &b.relative_path)));
@@ -669,6 +698,19 @@ impl DiscoveryAdapter for BuiltinAdapter {
             session_signals: self.session_signals(),
             excluded,
         })
+    }
+}
+
+/// Permission denial is an unreadable (e.g. org-managed) file; anything else is unsafe.
+fn failure_reason(error: &anyhow::Error) -> ExclusionReason {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    }) {
+        ExclusionReason::Unreadable
+    } else {
+        ExclusionReason::UnsafePath
     }
 }
 
