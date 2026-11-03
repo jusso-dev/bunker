@@ -362,6 +362,26 @@ fn cursor_environment_commands_never_keep_inline_credentials() {
     )
     .unwrap();
     assert!(!plain.modified);
+    // `=VALUE` binds even a value starting with `-`.
+    let dashed = sanitize(
+        br#"{"start":"tool --password=-fixture-dashed"}"#,
+        FileFormat::Json,
+    )
+    .unwrap();
+    assert!(dashed.modified);
+    assert!(!String::from_utf8(dashed.bytes)
+        .unwrap()
+        .contains("fixture-dashed"));
+    // Flags naming where a secret lives are references, not inline credentials.
+    for command in [
+        "tool --password-file /run/db-pass",
+        "tool --api-key-env SERVICE_KEY",
+        "tool --token_path=/run/token",
+    ] {
+        let input = serde_json::to_vec(&serde_json::json!({ "start": command })).unwrap();
+        let kept = sanitize(&input, FileFormat::Json).unwrap();
+        assert!(!kept.modified, "{command} was redacted");
+    }
 }
 
 #[test]

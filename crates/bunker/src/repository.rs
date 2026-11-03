@@ -459,9 +459,16 @@ impl Repository {
             bytes: 0,
             git: None,
             setup: None,
-            workspace: Some(self.workspace_identity(&workspace)?),
-            created_at_nanos: Some(u64::try_from(captured_at.as_nanos()).unwrap_or(u64::MAX)),
+            workspace: None,
+            created_at_nanos: None,
         };
+        // Only session rollback reads these fields. Older readers reject unknown
+        // manifest fields, so other snapshots keep the earlier manifest shape.
+        if manifest.trigger == SESSION_START || manifest.trigger == SESSION_END {
+            manifest.workspace = Some(self.workspace_identity(&workspace)?);
+            manifest.created_at_nanos =
+                Some(u64::try_from(captured_at.as_nanos()).unwrap_or(u64::MAX));
+        }
         // Hold cooperative exclusion through both Git and workspace capture.
         let _git_access = match git::ExclusiveAccess::optional(&workspace) {
             Ok(access) => {
