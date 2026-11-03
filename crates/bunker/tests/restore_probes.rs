@@ -371,6 +371,10 @@ fn git_snapshots_probe_verified_file_content_without_replaying_refs_or_config() 
                 "-c",
                 "core.hooksPath=/dev/null",
                 "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
+                "-c",
                 "protocol.allow=never",
                 "-C",
             ])

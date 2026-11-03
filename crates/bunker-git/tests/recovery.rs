@@ -31,6 +31,11 @@ fn git(path: &Path, args: &[&str]) -> String {
             "core.hooksPath=/dev/null",
             "-c",
             "core.fsmonitor=false",
+            // Detached auto-maintenance can write into .git while a capture reads it.
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
             "-c",
             "protocol.file.allow=always",
         ])
