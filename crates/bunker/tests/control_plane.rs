@@ -35,12 +35,16 @@ fn identity() -> HostIdentity {
 }
 fn private_dir(root: &Path, name: &str) -> PathBuf {
     let dir = root.join(name);
-    fs::create_dir(&dir).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        fs::create_dir(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
+    // A plain directory inherits its parent's ACL and is rejected; let Bunker create it
+    // with a protected owner-only DACL instead.
+    #[cfg(windows)]
+    CredentialStore::open(&root.canonicalize().unwrap().join(name)).unwrap();
     dir.canonicalize().unwrap()
 }
 fn key() -> PKey<Private> {
@@ -297,6 +301,10 @@ fn enrollment(
         assert_eq!(r.body.as_object().unwrap().len(), 2);
         (201, issue(r.body["csr"].as_str().unwrap(), &ck, &cc, mode))
     });
+    // On Windows the token inherits owner-only access from a Bunker-created directory.
+    #[cfg(windows)]
+    let token = private_dir(root, "token").join("token");
+    #[cfg(not(windows))]
     let token = root.join("token");
     fs::write(&token, "disposable-token-never-production-123456\n").unwrap();
     #[cfg(unix)]

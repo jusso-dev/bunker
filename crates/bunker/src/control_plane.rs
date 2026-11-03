@@ -14,7 +14,6 @@ use reqwest::{blocking::Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     time::Duration,
@@ -148,7 +147,7 @@ impl Credentials {
 }
 
 /// Private, owner-only directory; credentials are replaced as one fsynced atomic file.
-/// Unix permissions are enforced. Other platforms fail closed pending an ACL implementation.
+/// Unix permissions and Windows owner-only ACLs are enforced. Other platforms fail closed.
 pub struct CredentialStore {
     dir: PathBuf,
 }
@@ -181,7 +180,7 @@ impl CredentialStore {
         temporary
             .persist(self.dir.join("identity.json"))
             .map_err(|_| anyhow::anyhow!("persist host credential state"))?;
-        File::open(&self.dir)?.sync_all()?;
+        crate::repository::sync_ambient_dir(&self.dir)?;
         Ok(())
     }
 }
@@ -590,11 +589,26 @@ pub(crate) fn private_directory(path: &Path) -> Result<PathBuf> {
         // Also flush when a previous create succeeded but its parent sync failed.
         // An existing name alone does not establish durable directory linkage.
         if let Some(parent) = canonical.parent() {
-            File::open(parent)?.sync_all()?;
+            std::fs::File::open(parent)?.sync_all()?;
         }
         Ok(canonical)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let absolute = std::path::absolute(path)?;
+        // Created with a protected owner-only DACL; an existing name is validated, not fixed.
+        crate::win_acl::create_private_directory(&absolute)?;
+        crate::win_acl::check_path(&absolute, true)
+            .context("host state directory must be owner-only and not a symlink")?;
+        // Reject junctioned or symlinked parents, as on Unix. Directory sync is a no-op here.
+        let canonical = path.canonicalize()?;
+        ensure!(
+            crate::win_acl::same_path(&absolute, &canonical),
+            "host state path must be canonical without symlinks"
+        );
+        Ok(canonical)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         anyhow::bail!("host credential ACL enforcement is not implemented on this platform")
@@ -626,7 +640,25 @@ pub(crate) fn read_private(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>
         );
         Ok(bytes)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        crate::win_acl::check_file(&file)
+            .context("credential/token file must be owner-only, regular, and not linked")?;
+        let mut bytes = Zeroizing::new(Vec::new());
+        file.take(limit + 1).read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= limit,
+            "protected file exceeds size limit"
+        );
+        Ok(bytes)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, limit);
         anyhow::bail!("protected file ACL enforcement unavailable")

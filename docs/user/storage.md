@@ -79,7 +79,7 @@ bunker replicate --repo "$BUNKER_REPOSITORY" --storage drive.toml --consumer-sta
 bunker recover --repo "$RECOVERED_REPOSITORY" --storage drive.toml --consumer-state /protected/drive-state --consumer-report /protected/recovery/drive.json --namespace "$REPOSITORY_NAMESPACE"
 ```
 
-Use one canonical owner-only state directory per provider/folder/client. The CLI holds an exclusive lock and atomically persists refresh-token rotations before using the new credential; saved rotations take precedence over an old environment token. Preserve this private state through upgrades and keep it outside captured workspaces/repositories. Invalid, linked or permissive credential files fail closed. Windows ACL support is not implemented.
+Use one canonical owner-only state directory per provider/folder/client. The CLI holds an exclusive lock and atomically persists refresh-token rotations before using the new credential; saved rotations take precedence over an old environment token. Preserve this private state through upgrades and keep it outside captured workspaces/repositories. Invalid, linked or permissive credential files fail closed. On Windows, owner-only means the ACL rules in [host integration](../host-integration.md) point 6: let Bunker create the state directory so it receives a protected DACL for the running user and SYSTEM only.
 
 Before requesting a refresh, the state directory durably records an in-progress
 marker. A lost or ambiguous response therefore blocks reuse of the old token even

@@ -36,8 +36,13 @@ be regular files owned by the running user, have no hard links, and have owner-o
 permissions. Existing report/OAuth directories must also be owner-only. New state
 directories are created with mode `0700` under an existing safe parent. Files are
 written with mode `0600`, atomically published, fsynced, and read back. Ancestors
-must not be writable by other users except sticky directories. Platforms without
-the implemented Unix permission checks fail closed.
+must not be writable by other users except sticky directories. On Windows the same
+owner, link and reparse-point rules are enforced through ACLs (see
+[host integration](host-integration.md) point 6): new directories receive a protected
+DACL for the running user and SYSTEM instead of mode `0700`, and files inherit it.
+Windows has no equivalent of the ancestor-writability check yet, so keep state under
+a parent that only the service identity and administrators can modify. Other
+platforms fail closed.
 
 Both state directories and configuration files must be disjoint from the repository
 and workspace, from each other, and from any local replication destination. The

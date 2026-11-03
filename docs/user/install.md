@@ -74,6 +74,8 @@ The CLI is a console program, not an SCM service. The `packaging/windows/bunker-
 
 Under that service identity, provision a DPAPI-protected credential using `Read-Host -AsSecureString | Export-Clixml -Path passphrase.dpapi.xml`, then restrict directory ACLs to administrators and the service identity. DPAPI is tied to that Windows account/machine and is not portable escrow. Initialize the repository with the same passphrase using a secure environment-injection process. The wrapper reads the protected value at runtime and removes it from its environment on exit.
 
+Host-mode state is checked more strictly than those directory ACLs. The credential and consumed-request directories, host storage report and OAuth directories, enrollment token file and storage configuration files may only grant access to the service identity, SYSTEM and, for an elevated process, BUILTIN\Administrators as the token default owner; an entry for Administrators, Users or Everyone otherwise causes a fail-closed error. Let Bunker create state directories, which applies a protected owner-only DACL. For token and configuration files, create them inside a directory prepared the same way, for example `icacls DIR /inheritance:r /grant:r "SERVICE_ACCOUNT:(OI)(CI)F" "SYSTEM:(OI)(CI)F"` run before the files are written, with DIR owned by the service identity. See [host integration](../host-integration.md) point 6 for the exact checks.
+
 After reviewing identity, ACLs, executable trust and paths, use WinSW's `install`, `start`, `stop`, and `uninstall` commands. The service defaults to manual start until configured and tested. Windows MSI signing, WinSW deployment and service lifecycle are not verified by this task.
 
 ## GitHub Actions
