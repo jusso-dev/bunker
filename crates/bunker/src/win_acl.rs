@@ -2,8 +2,11 @@
 //!
 //! The Unix rules (mode 0700/0600, owned by the effective user, no links) map to ACLs:
 //! the owner must be a trusted SID, the DACL must exist and every allow entry must name a
-//! trusted SID, directories must carry a protected DACL (no inherited entries), and
-//! reparse points (symlinks, junctions) and multiply linked files are rejected.
+//! trusted SID, directories must carry a protected DACL (no inherited entries) with an
+//! inheritable TokenUser grant so new files never fall back to the token default DACL,
+//! and reparse points (symlinks, junctions) and multiply linked files are rejected.
+//! Every ancestor up to the volume root must also deny untrusted principals the rights
+//! to replace it or rewrite its ACL (see `check_ancestors`).
 //! Trusted SIDs are the process token user, the token default owner (BUILTIN\Administrators
 //! for elevated administrators) and LocalSystem.
 use anyhow::{ensure, Context, Result};
@@ -168,8 +171,11 @@ struct Security {
 impl Security {
     /// GetSecurityInfo returns one LocalAlloc descriptor allocation. Bound every
     /// pointer and ACL/SID read by the allocation, not by attacker-controlled sizes.
-    fn bytes_from(&self, pointer: *const u8, minimum: usize) -> Result<&[u8]> {
+    /// Exactly `length` bytes at `pointer`, which must lie inside the descriptor
+    /// allocation. Never spans the uninitialised allocation tail.
+    fn bytes_from(&self, pointer: *const u8, length: usize) -> Result<&[u8]> {
         let start = self.descriptor as usize;
+        let wanted = length;
         let length = unsafe { LocalSize(self.descriptor) };
         ensure!(
             length != 0,
@@ -179,18 +185,21 @@ impl Security {
         let offset = offset
             .filter(|offset| *offset <= length)
             .context("security data is outside its descriptor")?;
-        ensure!(minimum <= length - offset, "truncated security descriptor");
-        Ok(unsafe { std::slice::from_raw_parts(pointer, length - offset) })
+        ensure!(wanted <= length - offset, "truncated security descriptor");
+        Ok(unsafe { std::slice::from_raw_parts(pointer, wanted) })
     }
     fn entries(&self) -> Result<Vec<crate::win_acl_parser::Ace<'_>>> {
         ensure!(
             !self.dacl.is_null(),
             "protected path has a NULL DACL granting everyone access"
         );
-        crate::win_acl_parser::parse_acl(self.bytes_from(self.dacl.cast(), 8)?)
+        let header = self.bytes_from(self.dacl.cast(), 8)?;
+        let size = usize::from(u16::from_le_bytes([header[2], header[3]]));
+        crate::win_acl_parser::parse_acl(self.bytes_from(self.dacl.cast(), size.max(8))?)
     }
     fn checked_owner(&self) -> Result<PSID> {
-        let bytes = self.bytes_from(self.owner.cast(), 8)?;
+        let header = self.bytes_from(self.owner.cast(), 8)?;
+        let bytes = self.bytes_from(self.owner.cast(), 8 + 4 * usize::from(header[1]))?;
         crate::win_acl_parser::sid_length(bytes)?;
         Ok(self.owner)
     }
@@ -610,6 +619,8 @@ mod tests {
             custom_acl(&ancestor, 0, Some((&everyone, mask, 0)));
             let error = check_ancestors(&ancestor.join("state")).unwrap_err();
             assert!(error.to_string().contains("replacement or ACL control"));
+            // The fixture ancestor, not an unrelated runner directory, is rejected.
+            assert!(error.to_string().contains(&*ancestor.to_string_lossy()));
         }
         // Windows maps GENERIC_WRITE on a directory to add-file/add-subdirectory
         // rights, which cannot delete, rename or re-ACL it.

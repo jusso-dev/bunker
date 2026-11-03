@@ -49,8 +49,7 @@ following its final reparse point. Non-root reparse points (including junctions 
 mount points) are rejected. Effective untrusted allow ACEs granting `DELETE`
 (except on the root), `FILE_DELETE_CHILD`, `WRITE_DAC`, `WRITE_OWNER`, `GENERIC_ALL`
 or `GENERIC_WRITE` are rejected. Inherit-only ACEs are ignored for this ancestor
-check; create-file/create-folder grants alone are allowed, supporting standard
-volume, Users, Temp and ProgramData layouts. Ancestor control is trusted only for
+check; create-file/create-folder grants alone are allowed. Default `C:\Users\<user>` (including `AppData\Local\Temp`), `C:\ProgramData` and the LocalSystem profile pass. Folders created directly under `C:\` (for example `C:\dev`) and folders on default secondary NTFS volumes inherit Modify for Authenticated Users, so any signed-in user could rename and replace them; they are rejected until that inherited grant is removed or narrowed. On Windows this ancestor check also applies to repository, workspace and local replication paths used by host storage, not only to state directories. Object and callback (conditional) ACEs anywhere in the chain are rejected rather than interpreted. The volume root is identified from the path, so do not place state on `subst` drives or mapped network drives, whose real parent chain is not checked. Overlap checks fold case with Unicode lowercase, which can differ from the NTFS uppercase table for rare characters. ACL changes made by trusted principals after a store is opened are not rechecked during a long-running service, and holders of backup/restore privileges bypass ACLs entirely. Ancestor control is trusted only for
 the token user, token default owner, SYSTEM, BUILTIN\Administrators (including
 when the process is not elevated) and the Windows TrustedInstaller service.
 Ancestor owners must also be trusted because ownership normally permits DACL
