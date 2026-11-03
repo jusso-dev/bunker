@@ -591,7 +591,7 @@ pub(crate) fn private_directory(path: &Path) -> Result<PathBuf> {
         // Also flush when a previous create succeeded but its parent sync failed.
         // An existing name alone does not establish durable directory linkage.
         if let Some(parent) = canonical.parent() {
-            std::fs::File::open(parent)?.sync_all()?;
+            crate::repository::sync_ambient_dir(parent)?;
         }
         Ok(canonical)
     }

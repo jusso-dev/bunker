@@ -190,6 +190,16 @@ export function storageProtectionError(
     return "A disaster recovery copy requires immutable primary storage";
   return null;
 }
+/** Host schedules add up to this much jitter to each backup interval. */
+export const hostJitterAllowanceMinutes = 1;
+/** A threshold at or inside the on-time cadence would alert on every on-time backup. */
+export function missedBackupError(
+  p: Pick<Policy, "intervalMinutes" | "missedBackupMinutes">,
+): string | null {
+  const onTime = p.intervalMinutes + hostJitterAllowanceMinutes;
+  if (p.missedBackupMinutes > onTime) return null;
+  return `Missed backup threshold must be more than ${onTime} minutes (the backup interval plus ${hostJitterAllowanceMinutes} minute of scheduling jitter), or every on-time backup is reported as missed`;
+}
 
 export const certificateRequest = z.strictObject({
   csr: z.string().min(100).max(16384),

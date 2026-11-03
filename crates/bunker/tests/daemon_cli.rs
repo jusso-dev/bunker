@@ -88,7 +88,7 @@ fn log_level_flag_and_env_filter_structured_lines() {
 }
 
 #[test]
-fn invalid_log_levels_are_rejected_clearly() {
+fn invalid_log_flag_is_rejected_and_invalid_env_falls_back_to_info() {
     let f = Fixture::new();
     let flag = f.daemon_once(|c| {
         c.args(["--log-level", "loud"]);
@@ -98,26 +98,35 @@ fn invalid_log_levels_are_rejected_clearly() {
     assert!(stderr.contains("invalid log level"), "{stderr}");
     assert!(stderr.contains("error, warn, info or debug"), "{stderr}");
 
+    // An invalid ambient BUNKER_LOG must not abort hooks, session capture or the daemon.
     let env = f.daemon_once(|c| {
         c.env("BUNKER_LOG", "loud");
     });
-    assert_eq!(env.status.code(), Some(1));
+    assert!(
+        env.status.success(),
+        "{}",
+        String::from_utf8_lossy(&env.stderr)
+    );
     let lines = log_lines(&env.stderr);
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["level"], "error");
+    assert_eq!(lines[0]["level"], "warn");
+    assert_eq!(lines[0]["event"], "invalid_log_level");
     let message = lines[0]["message"].as_str().unwrap();
     assert!(
         message.starts_with("BUNKER_LOG: invalid log level"),
         "{message}"
     );
+    assert!(message.ends_with("using info"), "{message}");
+    // Fell back to info: informational records appear, debug records do not.
+    assert!(lines.iter().any(|l| l["event"] == "daemon_started"));
+    assert!(!levels(&lines).contains(&"debug"));
     assert!(
-        !f.repo.join("schedule.json").exists(),
-        "rejected configuration still ran the scheduler"
+        f.repo.join("schedule.json").exists(),
+        "fallback configuration did not run the scheduler"
     );
     let empty = f.daemon_once(|c| {
         c.env("BUNKER_LOG", "");
     });
-    assert!(!empty.status.success());
+    assert!(empty.status.success());
     assert!(String::from_utf8_lossy(&empty.stderr).contains("invalid log level"));
 }
 

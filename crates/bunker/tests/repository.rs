@@ -283,6 +283,81 @@ fn cli_restore_reports_pre_restore_snapshot_id() {
 }
 
 #[test]
+fn cli_restore_reports_safety_snapshot_cause_and_explicit_opt_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let repository = repo(&root);
+    let work = workspace(&root);
+    fs::write(work.join("a.txt"), "original").unwrap();
+    fs::write(work.join("b.txt"), "12345678").unwrap();
+    let snapshot = repository
+        .snapshot(&work, &Policy::default(), None, None, "manual")
+        .unwrap();
+    drop(repository);
+    fs::write(work.join("a.txt"), "unsaved!").unwrap();
+    // Two 8-byte files exceed a 10-byte cap without either being skipped as oversized.
+    let policy = root.join("policy.toml");
+    fs::write(&policy, "size_cap_bytes = 10\nmax_file_bytes = 10\n").unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_bunker"))
+            .arg("--repo")
+            .arg(root.join("repository"))
+            .arg("--policy")
+            .arg(&policy)
+            .args(args)
+            .arg("--workspace")
+            .arg(&work)
+            .env("BUNKER_PASSPHRASE", "fixture-passphrase-only")
+            .env_remove("BUNKER_LOG")
+            .output()
+            .unwrap()
+    };
+    let documents = |output: &std::process::Output| {
+        serde_json::Deserializer::from_slice(&output.stdout)
+            .into_iter::<serde_json::Value>()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+    };
+    let preview = run(&["restore", &snapshot.id]);
+    assert!(preview.status.success());
+    let token = documents(&preview)[0]["confirmation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let refused = run(&["restore", &snapshot.id, "--confirm", &token]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("pre-restore safety snapshot failed"),
+        "{stderr}"
+    );
+    // The full cause chain is reported, not only the outer context.
+    assert!(
+        stderr.contains("over the 10-byte policy size cap"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--no-safety-snapshot"), "{stderr}");
+    assert_eq!(fs::read(work.join("a.txt")).unwrap(), b"unsaved!");
+    let restored = run(&[
+        "restore",
+        &snapshot.id,
+        "--confirm",
+        &token,
+        "--no-safety-snapshot",
+    ]);
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored = documents(&restored);
+    assert_eq!(restored[1]["restored"], true);
+    assert_eq!(restored[1]["safety_snapshot_skipped"], true);
+    assert!(restored[1]["pre_restore_snapshot"].is_null());
+    assert_eq!(fs::read(work.join("a.txt")).unwrap(), b"original");
+}
+
+#[test]
 fn traversal_and_repository_overlap_rejected() {
     for path in [
         "../outside",

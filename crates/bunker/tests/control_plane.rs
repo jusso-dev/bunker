@@ -718,7 +718,12 @@ fn metadata_only_encrypted_plan_one_shot_claim_completion_and_restart_replay() {
     assert!(state.lock().unwrap().claim.is_none());
     assert_eq!(f.content(), "changed private content");
     let safety = client
-        .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
         .unwrap()
         .expect("host-approved overwrite takes a pre-restore snapshot");
     assert_eq!(f.content(), "original private content");
@@ -733,7 +738,12 @@ fn metadata_only_encrypted_plan_one_shot_claim_completion_and_restart_replay() {
     // Put the destination back to its original before-state; replay still cannot claim or write.
     fs::write(f.work.join("private-name.txt"), "changed private content").unwrap();
     assert!(client
-        .execute_restore_once(&f.repo, &reopened, &request.local_request_id)
+        .execute_restore_once(
+            &f.repo,
+            &reopened,
+            &request.local_request_id,
+            &policy::Policy::default()
+        )
         .is_err());
     assert_eq!(state.lock().unwrap().calls.len(), before);
     assert_eq!(f.content(), "changed private content");
@@ -767,7 +777,12 @@ fn stale_destination_manifest_and_replaced_directory_never_claim() {
             }
         }
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert!(state.lock().unwrap().claim.is_none());
     }
@@ -792,12 +807,22 @@ fn denied_expired_cross_tenant_bad_claim_and_ambiguous_claim_never_write_or_retr
             }
         }
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert_eq!(f.content(), "changed private content");
         let calls = state.lock().unwrap().calls.len();
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert_eq!(state.lock().unwrap().calls.len(), calls);
     }
@@ -819,7 +844,12 @@ fn destination_mutated_during_claim_reports_failure_and_completion_loss_never_re
             }
         }
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert_eq!(
             f.content(),
@@ -831,7 +861,12 @@ fn destination_mutated_during_claim_reports_failure_and_completion_loss_never_re
         );
         let calls = state.lock().unwrap().calls.len();
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert_eq!(state.lock().unwrap().calls.len(), calls);
         let expected = if mutate { "failed" } else { "succeeded" };
@@ -842,6 +877,89 @@ fn destination_mutated_during_claim_reports_failure_and_completion_loss_never_re
             .iter()
             .any(|(p, b)| p.ends_with("/complete") && b["status"] == expected));
     }
+}
+#[test]
+fn failed_safety_snapshot_leaves_request_retryable_and_reports_cause() {
+    let f = RestoreFixture::new();
+    let transport = FakeTransport::new();
+    let state = transport.0.clone();
+    let mut client = HostClient::new(transport, identity());
+    let request = f.request(&mut client);
+    let excluding = policy::Policy {
+        exclusions: vec!["private-name.txt".into()],
+        ..policy::Policy::default()
+    };
+    let error = client
+        .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id, &excluding)
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("request not consumed"), "{message}");
+    assert!(message.contains("omitted a file to overwrite"), "{message}");
+    // Nothing irreversible happened: no fetch, claim, completion, consumption or write.
+    {
+        let s = state.lock().unwrap();
+        assert!(s.claim.is_none());
+        assert!(!s.calls.iter().any(|(path, _)| path.contains("/restores/")));
+    }
+    assert_eq!(fs::read_dir(f.consumed.path()).unwrap().count(), 0);
+    assert_eq!(f.content(), "changed private content");
+    // After fixing the cause the same human approval executes once.
+    let safety = client
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
+        .unwrap()
+        .expect("overwrite takes a safety snapshot");
+    assert_eq!(f.content(), "original private content");
+    assert_eq!(f.repo.manifest(&safety).unwrap().trigger, "pre-restore");
+    assert!(client
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
+        .is_err());
+}
+#[test]
+fn host_safety_snapshot_uses_authenticated_bindings_policy() {
+    let f = RestoreFixture::new();
+    let transport = FakeTransport::new();
+    let state = transport.0.clone();
+    let mut policies = policy_value();
+    policies[0]["body"]["exclusions"] = json!(["private-name.txt"]);
+    state.lock().unwrap().policy = Some(policies);
+    let mut client = HostClient::new(transport, identity());
+    let request = f.request(&mut client);
+    let bindings =
+        LocalBindings::local_repository(&f.repo, "local-repository", "wrapped-key").unwrap();
+    // The administrator's exclusion applies to the safety snapshot, so it cannot cover the
+    // overwritten file; the restore is refused before consumption rather than run unprotected.
+    let error = client
+        .execute_restore_with_bindings(&f.repo, &f.consumed, &request.local_request_id, &bindings)
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted a file to overwrite"),
+        "{error:#}"
+    );
+    assert!(state.lock().unwrap().claim.is_none());
+    assert_eq!(fs::read_dir(f.consumed.path()).unwrap().count(), 0);
+    assert_eq!(f.content(), "changed private content");
+    state.lock().unwrap().policy = Some(policy_value());
+    let safety = client
+        .execute_restore_with_bindings(&f.repo, &f.consumed, &request.local_request_id, &bindings)
+        .unwrap()
+        .unwrap();
+    assert_eq!(f.content(), "original private content");
+    assert_eq!(
+        &*f.repo
+            .file_bytes(&f.repo.manifest(&safety).unwrap().files[0])
+            .unwrap(),
+        b"changed private content"
+    );
 }
 #[test]
 fn ambiguous_creation_is_once_and_keeps_only_encrypted_local_intent() {
@@ -895,7 +1013,9 @@ fn session_rollback_is_requested_approved_and_executed_as_session_kind() {
     fs::remove_file(work.join("removed.txt")).unwrap();
     fs::write(work.join("created.txt"), "agent created").unwrap();
     capture(repository::SESSION_END);
-    let rollback = repo.session_rollback("private-bridge-session").unwrap();
+    let rollback = repo
+        .session_rollback("private-bridge-session", &work)
+        .unwrap();
     let consumed = ConsumedRequests::open(&private_dir(&root, "consumed")).unwrap();
     let transport = FakeTransport::new();
     let state = transport.0.clone();
@@ -925,7 +1045,12 @@ fn session_rollback_is_requested_approved_and_executed_as_session_kind() {
     // An approval relabelled as a workspace restore is refused without writing.
     state.lock().unwrap().restore.as_mut().unwrap()["kind"] = json!("workspace");
     assert!(client
-        .execute_restore_once(&repo, &refused, &request.local_request_id)
+        .execute_restore_once(
+            &repo,
+            &refused,
+            &request.local_request_id,
+            &policy::Policy::default()
+        )
         .is_err());
     assert_eq!(
         fs::read_to_string(work.join("edited.txt")).unwrap(),
@@ -935,7 +1060,12 @@ fn session_rollback_is_requested_approved_and_executed_as_session_kind() {
         .request_restore(&repo, &consumed, &rollback.rollback_snapshot, &work, None)
         .unwrap();
     client
-        .execute_restore_once(&repo, &consumed, &request.local_request_id)
+        .execute_restore_once(
+            &repo,
+            &consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
         .unwrap();
     assert_eq!(
         fs::read_to_string(work.join("edited.txt")).unwrap(),
@@ -1275,7 +1405,12 @@ fn concurrent_executors_have_exactly_one_durable_claim_winner() {
             let mut client = HostClient::new(transport.clone(), identity());
             barrier.wait();
             client
-                .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+                .execute_restore_once(
+                    &f.repo,
+                    &f.consumed,
+                    &request.local_request_id,
+                    &policy::Policy::default(),
+                )
                 .is_ok()
         };
         let left = scope.spawn(run);
@@ -1305,14 +1440,24 @@ fn invalid_completion_ack_does_not_report_success_or_allow_execution_replay() {
     let request = f.request(&mut client);
     state.lock().unwrap().completion_bad_ack = true;
     let error = client
-        .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("acknowledgement mismatch"));
     assert_eq!(f.content(), "original private content");
     let calls = state.lock().unwrap().calls.len();
     fs::write(f.work.join("private-name.txt"), "changed private content").unwrap();
     assert!(client
-        .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default()
+        )
         .is_err());
     assert_eq!(state.lock().unwrap().calls.len(), calls);
 }

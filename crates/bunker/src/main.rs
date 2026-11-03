@@ -139,6 +139,9 @@ enum Command {
         /// Permit overwriting settings with unbound secret placeholders (local operator action).
         #[arg(long)]
         allow_rebind_overwrite: bool,
+        /// Restore without the pre-restore safety snapshot (no undo point); reported in the output.
+        #[arg(long)]
+        no_safety_snapshot: bool,
     },
     Verify {
         snapshot: String,
@@ -424,11 +427,12 @@ fn restore_target(
     repo: &Repository,
     snapshot: Option<String>,
     session: Option<String>,
+    workspace: &std::path::Path,
 ) -> Result<String> {
     match (snapshot, session) {
         (Some(snapshot), None) => Ok(snapshot),
         (None, Some(session)) => {
-            let rollback = repo.session_rollback(&session)?;
+            let rollback = repo.session_rollback(&session, workspace)?;
             print(&rollback)?;
             Ok(rollback.rollback_snapshot)
         }
@@ -443,23 +447,29 @@ impl std::fmt::Display for SessionExit {
     }
 }
 impl std::error::Error for SessionExit {}
-fn log_level(flag: Option<bunker::logging::Level>) -> Result<bunker::logging::Level> {
+/// An invalid `--log-level` is a clap usage error. An invalid ambient `BUNKER_LOG` must not
+/// stop hooks, session capture or MCP: warn and use the default.
+fn log_level(flag: Option<bunker::logging::Level>) -> bunker::logging::Level {
     if let Some(level) = flag {
-        return Ok(level);
+        return level;
     }
-    match std::env::var("BUNKER_LOG") {
-        Err(std::env::VarError::NotPresent) => Ok(bunker::logging::Level::Info),
-        Ok(value) => value
-            .parse()
-            .map_err(|error: String| anyhow::anyhow!("BUNKER_LOG: {error}")),
-        Err(_) => {
-            anyhow::bail!("BUNKER_LOG: invalid log level; expected error, warn, info or debug")
-        }
-    }
+    let invalid = match std::env::var("BUNKER_LOG") {
+        Err(std::env::VarError::NotPresent) => return bunker::logging::Level::Info,
+        Ok(value) => match value.parse() {
+            Ok(level) => return level,
+            Err(error) => error,
+        },
+        Err(_) => "invalid log level; expected error, warn, info or debug".to_owned(),
+    };
+    bunker::logging::warn(
+        &format!("BUNKER_LOG: {invalid}; using info"),
+        serde_json::json!({"event":"invalid_log_level"}),
+    );
+    bunker::logging::Level::Info
 }
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    bunker::logging::set_level(log_level(cli.log_level)?);
+    bunker::logging::set_level(log_level(cli.log_level));
     if let Command::ConsumerRebind {
         storage,
         consumer_state,
@@ -923,7 +933,7 @@ fn run() -> Result<()> {
                     file,
                 } => {
                     let workspace = config.validate_workspace(&workspace)?;
-                    let snapshot = restore_target(&repo, snapshot, session)?;
+                    let snapshot = restore_target(&repo, snapshot, session, &workspace)?;
                     let request = host.request_restore(
                         &repo,
                         &consumed,
@@ -936,7 +946,7 @@ fn run() -> Result<()> {
                 }
                 HostAction::ReviewRestore { id } => print(host.local_restore_preview(&repo, &id)?),
                 HostAction::ExecuteRestore { id } => {
-                    let safety = host.execute_restore_once(&repo, &consumed, &id)?;
+                    let safety = config.execute_restore(&mut host, &consumed, &repo, &id)?;
                     print(serde_json::json!({"restored_once":true,"pre_restore_snapshot":safety}))
                 }
                 HostAction::Enroll { .. } | HostAction::Run { .. } => unreachable!(),
@@ -1080,7 +1090,7 @@ fn run() -> Result<()> {
             workspace,
             file,
         } => {
-            let snapshot = restore_target(&repo, snapshot, session)?;
+            let snapshot = restore_target(&repo, snapshot, session, &workspace)?;
             print(repo.plan(&snapshot, &workspace, file.as_deref())?)
         }
         Command::Restore {
@@ -1090,8 +1100,9 @@ fn run() -> Result<()> {
             file,
             confirm,
             allow_rebind_overwrite,
+            no_safety_snapshot,
         } => {
-            let snapshot = restore_target(&repo, snapshot, session)?;
+            let snapshot = restore_target(&repo, snapshot, session, &workspace)?;
             let plan = repo.plan(&snapshot, &workspace, file.as_deref())?;
             print(&plan)?;
             match confirm {
@@ -1101,10 +1112,17 @@ fn run() -> Result<()> {
                         token == plan.confirmation,
                         "restore confirmation missing or stale; review fresh diff"
                     );
-                    let safety = repo
-                        .pre_restore_snapshot(&plan, &Policy::load(cli.policy.as_deref())?)
-                        .context("pre-restore safety snapshot failed; restore not started")?
-                        .map(|manifest| manifest.id);
+                    let safety = if no_safety_snapshot {
+                        repo.audit(
+                            "pre_restore_snapshot_skipped",
+                            serde_json::json!({"restoring":plan.snapshot}),
+                        )?;
+                        None
+                    } else {
+                        repo.pre_restore_snapshot(&plan, &Policy::load(cli.policy.as_deref())?)
+                            .context("pre-restore safety snapshot failed; restore not started (fix the cause, or pass --no-safety-snapshot to restore without an undo point)")?
+                            .map(|manifest| manifest.id)
+                    };
                     repo.restore_with_options(
                         &snapshot,
                         &workspace,
@@ -1112,7 +1130,9 @@ fn run() -> Result<()> {
                         &token,
                         allow_rebind_overwrite,
                     )?;
-                    print(serde_json::json!({"restored":true,"pre_restore_snapshot":safety}))
+                    print(
+                        serde_json::json!({"restored":true,"pre_restore_snapshot":safety,"safety_snapshot_skipped":no_safety_snapshot}),
+                    )
                 }
                 None => {
                     eprintln!("Review this diff, then repeat with --confirm <confirmation>.");
@@ -1346,7 +1366,7 @@ fn main() {
         if let Some(exit) = error.downcast_ref::<SessionExit>() {
             std::process::exit(exit.0);
         }
-        bunker::logging::error(&error.to_string(), serde_json::Value::Null);
+        bunker::logging::error(&format!("{error:#}"), serde_json::Value::Null);
         std::process::exit(1);
     }
 }

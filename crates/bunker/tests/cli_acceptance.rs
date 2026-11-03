@@ -365,14 +365,14 @@ fn session_rollback_requires_an_unambiguous_pre_session_baseline() {
     repo.snapshot(&f.work, &Policy::default(), None, None, "schedule")
         .unwrap();
     capture(SESSION_END);
-    assert!(repo.session_rollback("baseline-fixture").is_err());
+    assert!(repo.session_rollback("baseline-fixture", &f.work).is_err());
     capture(SESSION_START);
     // The session changed nothing.
-    assert!(repo.session_rollback("baseline-fixture").is_err());
+    assert!(repo.session_rollback("baseline-fixture", &f.work).is_err());
     capture(SESSION_START);
     put(&f.work, "a.txt", "two\n");
     assert!(repo
-        .session_rollback("baseline-fixture")
+        .session_rollback("baseline-fixture", &f.work)
         .unwrap_err()
         .to_string()
         .contains("ambiguous"));

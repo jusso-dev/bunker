@@ -33,6 +33,7 @@ import { AccountSettings, RecoveryForm } from "./human-account";
 import {
   alert as alertSchema,
   lockCapableStorage,
+  missedBackupError,
   storageProtectionError,
   type Policy,
 } from "@/lib/schemas";
@@ -1467,7 +1468,8 @@ function PolicyEditor({
     event.preventDefault();
     void save(policy);
   };
-  const protectionError = storageProtectionError(policy);
+  const protectionError =
+    storageProtectionError(policy) ?? missedBackupError(policy);
   return (
     <form className="panel policy" onSubmit={submit}>
       <fieldset disabled={disabled}>

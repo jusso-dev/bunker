@@ -124,6 +124,21 @@ impl HostConfig {
             ProductionHost::open(store, HttpsOrigin::parse(&self.host_origin)?, self.trust()?)?;
         Ok((host, consumed))
     }
+    /// Executes an approved bridge request once. The pre-restore safety snapshot uses the
+    /// same authenticated policy and local bindings as host captures of that workspace.
+    pub fn execute_restore(
+        &self,
+        host: &mut ProductionHost,
+        consumed: &ConsumedRequests,
+        repo: &Repository,
+        local_request_id: &str,
+    ) -> Result<Option<String>> {
+        let preview = host.local_restore_preview(repo, local_request_id)?;
+        let workspace = self.validate_workspace(Path::new(&preview.destination))?;
+        self.validate_storage_paths(repo.root(), &workspace)?;
+        let bindings = self.bindings(repo, &workspace)?;
+        host.execute_restore_once(repo, consumed, local_request_id, &bindings)
+    }
     pub fn validate_workspace(&self, workspace: &Path) -> Result<PathBuf> {
         let work = workspace.canonicalize()?;
         for path in [&self.credential_directory, &self.consumed_directory] {
@@ -173,8 +188,13 @@ struct Schedule {
     /// Interval that computed `next_run`; a refetched policy change reschedules.
     #[serde(default)]
     interval_seconds: u64,
+    /// Baseline (last success, or `created_at` before any) whose miss is recorded.
     #[serde(default)]
     missed_backup_for: Option<u64>,
+    /// When this schedule was first used for periodic capture; a host that never
+    /// succeeds is measured from here.
+    #[serde(default)]
+    created_at: u64,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -524,14 +544,20 @@ fn scheduled_work(
     let setup_agent = agent_id(agent)?;
     finish_detection(repo, state)?;
     let mut changed = apply_interval(state, policy);
-    if crate::scheduler::missed_backup_due(state.last_success, state.missed_backup_for, policy)
+    if state.created_at == 0 {
+        state.created_at = now();
+        changed = true;
+    }
+    let since = missed_baseline(state);
+    if crate::scheduler::missed_backup_due(since, state.missed_backup_for, policy)
         && state.pending_alerts.len() < MAX_ALERTS
     {
-        state.missed_backup_for = Some(state.last_success);
-        state.pending_alerts.push(missed_alert(state));
+        state.missed_backup_for = Some(since);
+        let alert = missed_alert(state, policy, since)?;
+        state.pending_alerts.push(alert);
         crate::logging::warn(
             "backup missed",
-            serde_json::json!({"event":"backup_missed","last_success":state.last_success,"threshold_seconds":policy.missed_backup_after()}),
+            serde_json::json!({"event":"backup_missed","last_success":state.last_success,"since":since,"threshold_seconds":policy.missed_backup_after()}),
         );
         changed = true;
     }
@@ -606,25 +632,34 @@ fn apply_interval(state: &mut Schedule, policy: &Policy) -> bool {
     state.interval_seconds = policy.interval_seconds;
     true
 }
-/// One alert per missed window: the fingerprint, and so the event ID, depends only on the
-/// host and the last success, so retries and restarts deduplicate.
-fn missed_alert(state: &Schedule) -> crate::scheduler::Alert {
-    crate::scheduler::Alert {
+/// Missed windows are measured from the last success, or from schedule creation when
+/// this host has never succeeded.
+fn missed_baseline(state: &Schedule) -> u64 {
+    if state.last_success > 0 {
+        state.last_success
+    } else {
+        state.created_at
+    }
+}
+/// One alert per missed window: the fingerprint, and so the event ID, binds the host,
+/// workspace, effective policy and missed baseline, so retries and restarts deduplicate
+/// while another workspace or policy raises its own alert.
+fn missed_alert(state: &Schedule, policy: &Policy, since: u64) -> Result<crate::scheduler::Alert> {
+    let policy_digest = blake3::hash(&serde_json::to_vec(policy)?);
+    let identity = serde_json::to_vec(&(
+        "bunker-backup-missed-v2",
+        state.host.unwrap_or_default(),
+        &state.workspace,
+        policy_digest.to_hex().as_str(),
+        since,
+    ))?;
+    Ok(crate::scheduler::Alert {
         kind: "backup_missed".into(),
-        fingerprint: blake3::hash(
-            format!(
-                "{}:backup_missed:{}",
-                state.host.unwrap_or_default(),
-                state.last_success
-            )
-            .as_bytes(),
-        )
-        .to_hex()
-        .to_string(),
+        fingerprint: blake3::hash(&identity).to_hex().to_string(),
         detected_at: now(),
         snapshot: None,
         count: 1,
-    }
+    })
 }
 fn outbox(state: &Schedule) -> WorkResults {
     let alerts = state
@@ -1039,6 +1074,7 @@ pub fn session_end(
     let mut state = load_schedule(&repo, &workspace, host.identity().host)?;
     let event_key = session_key(host.identity().host, event)?;
     let mut invoked = false;
+    host.set_last_success(state.last_success);
     let delivery = host.session_cycle(&repo, &bindings, |policy| {
         invoked = true;
         session_work(
@@ -1122,6 +1158,7 @@ pub fn run(
             let repo = Repository::open_with_key_source(repo_path, key)?;
             let bindings = config.bindings(&repo, &workspace)?;
             let mut state = load_schedule(&repo, &workspace, host.identity().host)?;
+            host.set_last_success(state.last_success);
             let report = host.cycle(&repo, &bindings, |policy| {
                 let mut work = scheduled_work(
                     &repo,
@@ -2164,26 +2201,83 @@ mod schedule_policy_tests {
         let delivered =
             scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).unwrap();
         assert!(delivered.alerts.is_empty(), "same window alerted twice");
+        let event = |state: &Schedule, policy: &Policy| {
+            let alert = missed_alert(state, policy, missed_baseline(state)).unwrap();
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, alert.fingerprint.as_bytes())
+        };
         let mut other = Schedule {
             host: Some(Uuid::from_u128(5)),
+            workspace: workspace.clone(),
             last_success: last,
             ..Schedule::default()
         };
-        assert_eq!(
-            Uuid::new_v5(
-                &Uuid::NAMESPACE_OID,
-                missed_alert(&other).fingerprint.as_bytes()
-            ),
-            id
-        );
+        assert_eq!(event(&other, &policy), id);
         other.last_success += 1;
-        assert_ne!(
-            Uuid::new_v5(
-                &Uuid::NAMESPACE_OID,
-                missed_alert(&other).fingerprint.as_bytes()
-            ),
-            id
+        assert_ne!(event(&other, &policy), id);
+        other.last_success = last;
+        // Another workspace or policy on the same host raises its own alert.
+        other.workspace = workspace.join("other");
+        assert_ne!(event(&other, &policy), id);
+        other.workspace = workspace.clone();
+        let stricter = Policy {
+            missed_backup_seconds: Some(1200),
+            ..policy.clone()
+        };
+        assert_ne!(event(&other, &stricter), id);
+    }
+
+    #[test]
+    fn on_time_cycle_never_raises_missed_backup() {
+        let (_temp, workspace, repo, mut state) = fixture();
+        // missedBackupMinutes equal to the interval: the latest on-time cycle is
+        // interval + jitter after the last success, past the configured threshold.
+        let policy = Policy {
+            missed_backup_seconds: Some(3600),
+            ..policy(3600, 60)
+        };
+        assert_eq!(policy.missed_backup_after(), 3600 + 60 + 60);
+        state.interval_seconds = 3600;
+        state.last_success = now() - 3660;
+        state.next_run = now();
+        let work = scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).unwrap();
+        assert_eq!(work.snapshots.len(), 1);
+        assert!(
+            work.alerts.is_empty(),
+            "on-time cycle raised a missed backup alert"
         );
+        assert!(state.missed_backup_for.is_none());
+    }
+
+    #[test]
+    fn never_successful_schedule_raises_missed_alert_from_creation() {
+        let (_temp, workspace, repo, mut state) = fixture();
+        let policy = Policy {
+            missed_backup_seconds: Some(1800),
+            ..policy(600, 0)
+        };
+        state.interval_seconds = 600;
+        state.next_run = now() + 3600;
+        // A new schedule starts measuring now and does not alert immediately.
+        let work = scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).unwrap();
+        assert!(work.alerts.is_empty());
+        let created = state.created_at;
+        assert!(created > 0);
+        assert_eq!(
+            load_schedule(&repo, &workspace, Uuid::from_u128(5))
+                .unwrap()
+                .created_at,
+            created
+        );
+        // Never succeeded and created long ago: the miss is measured from creation.
+        state.created_at = now() - 2000;
+        let work = scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).unwrap();
+        assert_eq!(work.alerts.len(), 1);
+        assert!(matches!(work.alerts[0].kind, AlertKind::BackupMissed));
+        assert_eq!(state.last_success, 0);
+        assert_eq!(state.missed_backup_for, Some(state.created_at));
+        state.pending_alerts.clear();
+        let again = scheduled_work(&repo, &workspace, "codex", &policy, &mut state, None).unwrap();
+        assert!(again.alerts.is_empty(), "same window alerted twice");
     }
 
     #[test]
@@ -2296,24 +2390,38 @@ mod schedule_policy_tests {
         assert_eq!(alerts.len(), 2);
         assert_eq!(alerts[0]["type"], "backup-failed");
         assert_eq!(alerts[0]["eventId"], alerts[1]["eventId"]);
+        // A successful capture between failures starts a new alert, even in the same window.
+        service.set_last_success(now());
+        assert!(service
+            .session_cycle(&repo, &bindings, |_| anyhow::bail!(
+                "fixture capture failure"
+            ))
+            .is_err());
+        let alerts = &service.client.transport_mut().alerts;
+        assert_eq!(alerts.len(), 3);
+        assert_ne!(alerts[2]["eventId"], alerts[1]["eventId"]);
         let at = now();
-        let id = failure_event_id(identity.host, Uuid::from_u128(9), 3600, at);
+        let id = failure_event_id(identity.host, Uuid::from_u128(9), 3600, 0, at);
         let window = at - at % 3600;
         assert_eq!(
             id,
-            failure_event_id(identity.host, Uuid::from_u128(9), 3600, window + 3599)
+            failure_event_id(identity.host, Uuid::from_u128(9), 3600, 0, window + 3599)
         );
         assert_ne!(
             id,
-            failure_event_id(identity.host, Uuid::from_u128(9), 3600, window + 3600)
+            failure_event_id(identity.host, Uuid::from_u128(9), 3600, 0, window + 3600)
         );
         assert_ne!(
             id,
-            failure_event_id(Uuid::new_v4(), Uuid::from_u128(9), 3600, at)
+            failure_event_id(Uuid::new_v4(), Uuid::from_u128(9), 3600, 0, at)
         );
         assert_ne!(
             id,
-            failure_event_id(identity.host, Uuid::from_u128(10), 3600, at)
+            failure_event_id(identity.host, Uuid::from_u128(10), 3600, 0, at)
+        );
+        assert_ne!(
+            id,
+            failure_event_id(identity.host, Uuid::from_u128(9), 3600, at - 10, at)
         );
     }
 }
