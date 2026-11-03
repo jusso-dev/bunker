@@ -133,6 +133,9 @@ pub(crate) fn valid_id(id: &str) -> Result<()> {
     );
     Ok(())
 }
+fn size_cap_refusal(what: &str, size: u64, cap: u64) -> String {
+    format!("{what} {size} bytes, over the {cap}-byte policy size cap (size_cap_bytes; sizeCapBytes on the control plane); no snapshot published")
+}
 pub fn safe_path(path: &str) -> Result<()> {
     bunker_discovery::validate_relative_path(Path::new(path))?;
     ensure!(
@@ -589,16 +592,20 @@ impl Repository {
                 continue;
             }
             total = total.checked_add(size).context("workspace size overflow")?;
-            ensure!(
-                total <= policy.size_cap_bytes,
-                "workspace exceeds size_cap_bytes; no snapshot published"
-            );
+            // Keep measuring so the refusal reports the actual workspace size.
+            if total > policy.size_cap_bytes {
+                continue;
+            }
             ensure!(
                 candidates.len() < 100000,
                 "snapshot exceeds 100000 files; narrow workspace or policy"
             );
             candidates.push(relative);
         }
+        ensure!(
+            total <= policy.size_cap_bytes,
+            size_cap_refusal("workspace is", total, policy.size_cap_bytes)
+        );
         for relative in candidates {
             let mut captured = None;
             for attempt in 1..=3 {
@@ -653,7 +660,11 @@ impl Repository {
                 .context("size overflow")?;
             ensure!(
                 manifest.bytes <= policy.size_cap_bytes,
-                "workspace exceeds size_cap_bytes; no snapshot published"
+                size_cap_refusal(
+                    "sanitized workspace content is at least",
+                    manifest.bytes,
+                    policy.size_cap_bytes
+                )
             );
             let mut chunks = vec![];
             for chunk in fastcdc::v2020::FastCDC::new(&bytes, 64 * 1024, 256 * 1024, 1024 * 1024) {
@@ -698,6 +709,29 @@ impl Repository {
             false,
         )?;
         Ok(manifest)
+    }
+    /// Safety snapshot of the destination before a restore overwrites existing files or Git
+    /// state, so the restore itself can be undone. `None` when nothing existing changes.
+    pub fn pre_restore_snapshot(
+        &self,
+        plan: &RestorePlan,
+        policy: &Policy,
+    ) -> Result<Option<Manifest>> {
+        if plan.git.is_none() && !plan.changes.iter().any(|c| c.action == "overwrite") {
+            return Ok(None);
+        }
+        let manifest = self.snapshot(
+            Path::new(&plan.destination),
+            policy,
+            None,
+            None,
+            "pre-restore",
+        )?;
+        self.audit(
+            "pre_restore_snapshot",
+            serde_json::json!({"snapshot":manifest.id,"restoring":plan.snapshot}),
+        )?;
+        Ok(Some(manifest))
     }
     pub fn file_bytes(&self, file: &FileEntry) -> Result<Zeroizing<Vec<u8>>> {
         let mut bytes = Zeroizing::new(Vec::new());
@@ -1122,6 +1156,20 @@ impl Repository {
             &crypto::seal(&self.key, &bytes, id.as_bytes())?,
             false,
         )
+    }
+    #[cfg(test)]
+    pub(crate) fn audit_details(&self, event: &str) -> Result<Vec<serde_json::Value>> {
+        let mut details = vec![];
+        for entry in self.dir.read_dir("audit")? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let bytes = read_bounded(&self.dir, &format!("audit/{name}"), MAX_MANIFEST)?;
+            let value: serde_json::Value =
+                serde_json::from_slice(&crypto::open(&self.key, &bytes, name.as_bytes())?)?;
+            if value["event"] == event {
+                details.push(value["detail"].clone());
+            }
+        }
+        Ok(details)
     }
     pub fn save_request(&self, value: &serde_json::Value) -> Result<String> {
         ensure!(

@@ -150,10 +150,113 @@ fn exclusions_and_cap_apply_before_publishing() {
         max_file_bytes: 10,
         ..Policy::default()
     };
-    assert!(repository
+    let message = repository
         .snapshot(&work, &policy, None, None, "manual")
-        .is_err());
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("workspace is 12 bytes"), "{message}");
+    assert!(message.contains("10-byte policy size cap"), "{message}");
+    assert!(message.contains("size_cap_bytes"), "{message}");
+    assert!(message.contains("sizeCapBytes"), "{message}");
     assert_eq!(repository.list().unwrap().len(), 1);
+}
+
+#[test]
+fn restore_takes_pre_restore_safety_snapshot_only_when_overwriting() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = repo(temp.path());
+    let work = workspace(temp.path());
+    fs::write(work.join("file.txt"), "original").unwrap();
+    let snapshot = repository
+        .snapshot(&work, &Policy::default(), None, None, "manual")
+        .unwrap();
+    // Nothing existing is overwritten: no safety snapshot.
+    let plan = repository.plan(&snapshot.id, &work, None).unwrap();
+    assert!(repository
+        .pre_restore_snapshot(&plan, &Policy::default())
+        .unwrap()
+        .is_none());
+    let empty = temp.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    let plan = repository.plan(&snapshot.id, &empty, None).unwrap();
+    assert!(repository
+        .pre_restore_snapshot(&plan, &Policy::default())
+        .unwrap()
+        .is_none());
+    assert_eq!(repository.list().unwrap().len(), 1);
+
+    fs::write(work.join("file.txt"), "unsaved work").unwrap();
+    let plan = repository.plan(&snapshot.id, &work, None).unwrap();
+    let safety = repository
+        .pre_restore_snapshot(&plan, &Policy::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(safety.trigger, "pre-restore");
+    repository
+        .restore(&snapshot.id, &work, None, &plan.confirmation)
+        .unwrap();
+    assert_eq!(fs::read_to_string(work.join("file.txt")).unwrap(), "original");
+    // The safety snapshot undoes the restore.
+    let undo = repository.plan(&safety.id, &work, None).unwrap();
+    repository
+        .restore(&safety.id, &work, None, &undo.confirmation)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(work.join("file.txt")).unwrap(),
+        "unsaved work"
+    );
+}
+
+#[test]
+fn cli_restore_reports_pre_restore_snapshot_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let repository = repo(&root);
+    let work = workspace(&root);
+    fs::write(work.join("file.txt"), "original").unwrap();
+    let snapshot = repository
+        .snapshot(&work, &Policy::default(), None, None, "manual")
+        .unwrap();
+    drop(repository);
+    fs::write(work.join("file.txt"), "unsaved work").unwrap();
+    let run = |args: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_bunker"))
+            .arg("--repo")
+            .arg(root.join("repository"))
+            .args(args)
+            .arg("--workspace")
+            .arg(&work)
+            .env("BUNKER_PASSPHRASE", "fixture-passphrase-only")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::Deserializer::from_slice(&output.stdout)
+            .into_iter::<serde_json::Value>()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+    };
+    let preview = run(&["restore", &snapshot.id]);
+    let token = preview[0]["confirmation"].as_str().unwrap().to_owned();
+    let restored = run(&["restore", &snapshot.id, "--confirm", &token]);
+    assert_eq!(restored[1]["restored"], true);
+    let safety = restored[1]["pre_restore_snapshot"].as_str().unwrap();
+    let repository = Repository::open(&root.join("repository"), "fixture-passphrase-only").unwrap();
+    let manifest = repository.manifest(safety).unwrap();
+    assert_eq!(manifest.trigger, "pre-restore");
+    assert_eq!(
+        &*repository.file_bytes(&manifest.files[0]).unwrap(),
+        b"unsaved work"
+    );
+    drop(repository);
+    // Restoring again changes nothing, so no further safety snapshot is taken.
+    let preview = run(&["restore", &snapshot.id]);
+    let token = preview[0]["confirmation"].as_str().unwrap().to_owned();
+    let again = run(&["restore", &snapshot.id, "--confirm", &token]);
+    assert!(again[1]["pre_restore_snapshot"].is_null());
 }
 
 #[test]

@@ -311,7 +311,9 @@ impl Repository {
                 .context("setup size overflow")?;
             ensure!(
                 source_total <= policy.size_cap_bytes && output_total <= policy.size_cap_bytes,
-                "global setup exceeds size_cap_bytes; no setup manifests published"
+                "global setup is at least {} bytes, over the {}-byte policy size cap (size_cap_bytes; sizeCapBytes on the control plane); no setup manifests published",
+                source_total.max(output_total),
+                policy.size_cap_bytes
             );
             for (path, reason) in prepared.excluded {
                 let path = path.to_string_lossy().into_owned();

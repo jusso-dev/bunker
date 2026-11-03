@@ -25,6 +25,9 @@ pub struct Policy {
     /// Desired policy only. Automated boot/MCP restore probes are not implemented.
     pub restore_test_interval_seconds: u64,
     pub mass_delete_threshold: usize,
+    /// No successful backup for this long after the last one is a missed backup. Never earlier
+    /// than interval plus jitter; unset means interval plus jitter plus 60 seconds.
+    pub missed_backup_seconds: Option<u64>,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -42,6 +45,7 @@ impl Default for Policy {
             dr_repository: None,
             restore_test_interval_seconds: 86400,
             mass_delete_threshold: 20,
+            missed_backup_seconds: None,
         }
     }
 }
@@ -75,6 +79,12 @@ impl Policy {
         if self.jitter_seconds > self.interval_seconds {
             bail!("jitter_seconds must not exceed interval_seconds");
         }
+        if self
+            .missed_backup_seconds
+            .is_some_and(|s| !(60..=2_592_000).contains(&s))
+        {
+            bail!("missed_backup_seconds must be 60..2592000");
+        }
         if self.size_cap_bytes == 0
             || self.max_file_bytes == 0
             || self.max_file_bytes > self.size_cap_bytes
@@ -95,5 +105,11 @@ impl Policy {
             globset::Glob::new(pattern).context("invalid exclusion glob")?;
         }
         Ok(())
+    }
+    /// Seconds after the last success at which a backup counts as missed.
+    pub fn missed_backup_after(&self) -> u64 {
+        let due = self.interval_seconds.saturating_add(self.jitter_seconds);
+        self.missed_backup_seconds
+            .map_or(due.saturating_add(60), |seconds| seconds.max(due))
     }
 }
