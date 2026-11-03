@@ -2,7 +2,21 @@
 use anyhow::{bail, ensure, Context, Result};
 use opendal::{layers::RetryLayer, Operator};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
+/// Bunker transfer options. They live in `options` because they are non-secret,
+/// but they are consumed here and never passed to a provider builder.
+const TRANSFER_OPTIONS: [&str; 2] = ["upload_bytes_per_second", "multipart_chunk_bytes"];
+const MIN_UPLOAD_RATE: u64 = 64 * 1024;
+/// S3 rejects non-final parts below 5 MiB; no replicated object exceeds 64 MiB.
+const MIN_CHUNK: usize = 5 * 1024 * 1024;
+const MAX_CHUNK: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +55,8 @@ impl StorageConfig {
             "container",
             "account_name",
             "drive_id",
+            TRANSFER_OPTIONS[0],
+            TRANSFER_OPTIONS[1],
         ];
         ensure!(
             self.options.keys().all(|k| public.contains(&k.as_str())),
@@ -60,7 +76,9 @@ impl StorageConfig {
             ],
             _ => &[],
         };
+        self.transfer_limits()?;
         let mut options = self.options.clone();
+        options.retain(|key, _| !TRANSFER_OPTIONS.contains(&key.as_str()));
         for (key, env_name) in &self.credential_env {
             ensure!(
                 allowed_credentials.contains(&key.as_str()),
@@ -81,6 +99,127 @@ impl StorageConfig {
             );
         }
         build_operator(service, &options).map(|operator| operator.layer(RetryLayer::new()))
+    }
+    /// Operator plus Bunker transfer limits, for replication uploads.
+    pub fn store(&self) -> Result<TransferStore> {
+        Ok(TransferStore::new(self.operator()?, self.transfer_limits()?))
+    }
+    /// Configured provider region, recorded in replication output. Local targets
+    /// have no region. Azure accepts an informational `region` option.
+    pub fn region(&self) -> Option<&str> {
+        (self.service != "local")
+            .then(|| self.options.get("region").map(String::as_str))
+            .flatten()
+            .filter(|region| !region.trim().is_empty())
+    }
+    /// Non-secret target description for replication output and audit records.
+    pub fn target_summary(&self) -> serde_json::Value {
+        serde_json::json!({"service": self.service, "region": self.region()})
+    }
+    /// Consumer and local targets cannot enforce provider retention. Callers print
+    /// this before replicating so an operator never mistakes them for WORM storage.
+    pub fn immutability_warning(&self) -> Option<serde_json::Value> {
+        matches!(self.service.as_str(), "local" | "gdrive" | "onedrive").then(|| {
+            serde_json::json!({
+                "level": "warning",
+                "code": "immutability_unsupported",
+                "service": self.service,
+                "message": "this target does not support object lock or immutable retention; replicated copies can be deleted or overwritten by anyone with access to the target",
+            })
+        })
+    }
+    pub fn transfer_limits(&self) -> Result<TransferLimits> {
+        let number = |key: &str| -> Result<Option<u64>> {
+            self.options
+                .get(key)
+                .map(|v| {
+                    v.trim()
+                        .parse::<u64>()
+                        .with_context(|| format!("storage {key} must be a whole number of bytes"))
+                })
+                .transpose()
+        };
+        let upload_bytes_per_second = number(TRANSFER_OPTIONS[0])?;
+        if let Some(rate) = upload_bytes_per_second {
+            ensure!(
+                rate >= MIN_UPLOAD_RATE,
+                "upload_bytes_per_second must be at least {MIN_UPLOAD_RATE}"
+            );
+        }
+        let multipart_chunk_bytes = number(TRANSFER_OPTIONS[1])?
+            .map(|chunk| -> Result<usize> {
+                ensure!(
+                    matches!(self.service.as_str(), "s3" | "r2" | "azure"),
+                    "multipart_chunk_bytes applies to S3, R2 and Azure targets only"
+                );
+                let chunk = usize::try_from(chunk).unwrap_or(usize::MAX);
+                ensure!(
+                    (MIN_CHUNK..=MAX_CHUNK).contains(&chunk),
+                    "multipart_chunk_bytes must be between {MIN_CHUNK} and {MAX_CHUNK}"
+                );
+                Ok(chunk)
+            })
+            .transpose()?;
+        Ok(TransferLimits {
+            upload_bytes_per_second,
+            multipart_chunk_bytes,
+        })
+    }
+}
+
+/// Optional upload tuning. Retries come from OpenDAL's RetryLayer on every operator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferLimits {
+    /// Long-run average upload rate. Each object starts only when the bytes already
+    /// started fit the budget, so one object (at most 64 MiB) may burst above it.
+    pub upload_bytes_per_second: Option<u64>,
+    /// Objects larger than this are uploaded as conditional multipart/block uploads.
+    pub multipart_chunk_bytes: Option<usize>,
+}
+
+/// Replication store that applies [`TransferLimits`] to uploads.
+pub struct TransferStore {
+    operator: Operator,
+    limits: TransferLimits,
+    next_start: Mutex<Option<Instant>>,
+}
+impl TransferStore {
+    pub fn new(operator: Operator, limits: TransferLimits) -> Self {
+        Self {
+            operator,
+            limits,
+            next_start: Mutex::new(None),
+        }
+    }
+    pub fn operator(&self) -> &Operator {
+        &self.operator
+    }
+    pub fn limits(&self) -> TransferLimits {
+        self.limits
+    }
+    /// Reserve upload budget and return how long to wait before starting.
+    fn reserve(&self, bytes: u64, now: Instant) -> Duration {
+        let Some(rate) = self.limits.upload_bytes_per_second else {
+            return Duration::ZERO;
+        };
+        let mut next = self.next_start.lock().unwrap_or_else(|e| e.into_inner());
+        let start = next.map_or(now, |n| n.max(now));
+        *next = Some(start + Duration::from_secs_f64(bytes as f64 / rate as f64));
+        start - now
+    }
+}
+impl crate::checkpoint::RemoteStore for TransferStore {
+    async fn read_bounded(&self, path: &str, maximum: u64) -> Result<Vec<u8>> {
+        remote_read(&self.operator, path, maximum)
+            .await
+            .map_err(|_| anyhow::anyhow!("remote object unavailable"))
+    }
+    async fn create_verified(&self, path: &str, bytes: Vec<u8>) -> Result<()> {
+        let wait = self.reserve(bytes.len() as u64, Instant::now());
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        copy_verified_with(&self.operator, path, bytes, self.limits.multipart_chunk_bytes).await
     }
 }
 fn validate_endpoint(endpoint: &str) -> Result<()> {
@@ -238,6 +377,16 @@ pub async fn replicate_selected(
     Ok(count)
 }
 pub(crate) async fn copy_verified(operator: &Operator, path: &str, bytes: Vec<u8>) -> Result<()> {
+    copy_verified_with(operator, path, bytes, None).await
+}
+/// OpenDAL carries `if_not_exists` to S3 CompleteMultipartUpload and Azure
+/// PutBlockList, so chunked uploads keep the no-overwrite guarantee.
+async fn copy_verified_with(
+    operator: &Operator,
+    path: &str,
+    bytes: Vec<u8>,
+    chunk: Option<usize>,
+) -> Result<()> {
     ensure!(
         operator.info().capability().write_with_if_not_exists,
         "backend lacks conditional create; refusing overwrite-prone replication"
@@ -250,9 +399,11 @@ pub(crate) async fn copy_verified(operator: &Operator, path: &str, bytes: Vec<u8
             "remote object differs; refusing overwrite"
         ),
         Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
-            operator
-                .write_with(path, bytes)
-                .if_not_exists(true)
+            let mut write = operator.write_with(path, bytes).if_not_exists(true);
+            if let Some(chunk) = chunk {
+                write = write.chunk(chunk);
+            }
+            write
                 .await
                 .map_err(|_| anyhow::anyhow!("encrypted object upload failed"))?;
             let stored = remote_read(operator, path, maximum)
@@ -671,6 +822,145 @@ mod tests {
                 operator.read("fixture").await.unwrap().to_vec(),
                 b"existing"
             );
+        });
+    }
+    fn config(service: &str, options: &[(&str, &str)]) -> StorageConfig {
+        StorageConfig {
+            service: service.into(),
+            options: options
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
+            credential_env: BTreeMap::new(),
+            immutable: false,
+        }
+    }
+    #[test]
+    fn transfer_limits_parse_and_validate() {
+        let s3 = config(
+            "s3",
+            &[
+                ("upload_bytes_per_second", "1048576"),
+                ("multipart_chunk_bytes", "8388608"),
+            ],
+        );
+        assert_eq!(
+            s3.transfer_limits().unwrap(),
+            TransferLimits {
+                upload_bytes_per_second: Some(1048576),
+                multipart_chunk_bytes: Some(8388608),
+            }
+        );
+        assert_eq!(
+            config("azure", &[]).transfer_limits().unwrap(),
+            TransferLimits::default()
+        );
+        for (service, key, value) in [
+            ("s3", "upload_bytes_per_second", "1024"),
+            ("s3", "upload_bytes_per_second", "fast"),
+            ("s3", "upload_bytes_per_second", "-1"),
+            ("s3", "multipart_chunk_bytes", "1048576"),
+            ("s3", "multipart_chunk_bytes", "134217728"),
+            ("local", "multipart_chunk_bytes", "8388608"),
+        ] {
+            assert!(
+                config(service, &[(key, value)]).transfer_limits().is_err(),
+                "{service} {key}={value}"
+            );
+        }
+        // Limits are validated before any provider builder and never reach it.
+        let root = tempfile::tempdir().unwrap();
+        let local = config(
+            "local",
+            &[
+                ("root", root.path().to_str().unwrap()),
+                ("upload_bytes_per_second", "65536"),
+            ],
+        );
+        let store = local.store().unwrap();
+        assert_eq!(store.limits().upload_bytes_per_second, Some(65536));
+        assert!(config("local", &[("upload_bytes_per_second", "1")])
+            .operator()
+            .is_err());
+    }
+    #[test]
+    fn upload_budget_spaces_object_starts() {
+        let store = TransferStore::new(
+            Operator::new(opendal::services::Memory::default()).unwrap(),
+            TransferLimits {
+                upload_bytes_per_second: Some(1000),
+                multipart_chunk_bytes: None,
+            },
+        );
+        let now = Instant::now();
+        assert_eq!(store.reserve(500, now), Duration::ZERO);
+        assert_eq!(store.reserve(1000, now), Duration::from_millis(500));
+        assert_eq!(store.reserve(1, now), Duration::from_millis(1500));
+        // Idle time is not banked into a later burst.
+        let later = now + Duration::from_secs(10);
+        assert_eq!(store.reserve(1, later), Duration::ZERO);
+        let unlimited = TransferStore::new(
+            Operator::new(opendal::services::Memory::default()).unwrap(),
+            TransferLimits::default(),
+        );
+        assert_eq!(unlimited.reserve(u64::MAX, now), Duration::ZERO);
+    }
+    #[test]
+    fn region_and_immutability_warning_follow_target() {
+        let s3 = config("s3", &[("region", "ap-southeast-2")]);
+        assert_eq!(s3.region(), Some("ap-southeast-2"));
+        assert_eq!(
+            s3.target_summary(),
+            serde_json::json!({"service":"s3","region":"ap-southeast-2"})
+        );
+        assert!(s3.immutability_warning().is_none());
+        assert_eq!(config("azure", &[]).region(), None);
+        assert_eq!(config("local", &[("region", "ignored")]).region(), None);
+        for service in ["local", "gdrive", "onedrive"] {
+            let warning = config(service, &[]).immutability_warning().unwrap();
+            assert_eq!(warning["level"], "warning");
+            assert_eq!(warning["code"], "immutability_unsupported");
+            assert!(warning["message"]
+                .as_str()
+                .unwrap()
+                .contains("does not support object lock"));
+        }
+    }
+    #[test]
+    fn throttled_store_replicates_and_recovers() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let work = root.path().join("work");
+            fs::create_dir(&work).unwrap();
+            fs::write(work.join("a"), "fixture").unwrap();
+            let repo = crate::repository::Repository::init(
+                &root.path().join("repo"),
+                "fixture-passphrase-only",
+            )
+            .unwrap();
+            repo.snapshot(&work, &crate::policy::Policy::default(), None, None, "test")
+                .unwrap();
+            let store = TransferStore::new(
+                Operator::new(opendal::services::Memory::default()).unwrap(),
+                TransferLimits {
+                    upload_bytes_per_second: Some(MIN_UPLOAD_RATE),
+                    multipart_chunk_bytes: None,
+                },
+            );
+            let report = crate::checkpoint::replicate(&repo, &store, None)
+                .await
+                .unwrap();
+            let recovered = root.path().join("recovered");
+            crate::checkpoint::recover(
+                store.operator(),
+                &report.namespace,
+                &recovered,
+                &crate::repository::KeySource::passphrase("fixture-passphrase-only"),
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(recovered.join("repository.json").exists());
         });
     }
     #[derive(Clone)]

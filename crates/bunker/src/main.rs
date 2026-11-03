@@ -1106,6 +1106,9 @@ fn run() -> Result<()> {
             consumer_state,
         } => {
             let config = bunker::storage::StorageConfig::load(&storage)?;
+            if let Some(warning) = config.immutability_warning() {
+                eprintln!("{warning}");
+            }
             if matches!(config.service.as_str(), "gdrive" | "onedrive") {
                 use std::sync::Arc;
                 anyhow::ensure!(
@@ -1187,20 +1190,31 @@ fn run() -> Result<()> {
                     "protected report exceeds limit"
                 );
                 write_review_file(&output, &bytes)?;
+                let target = config.target_summary();
+                repo.audit(
+                    "replicated",
+                    serde_json::json!({"namespace":report.namespace,"storage":target,"immutable":true}),
+                )?;
                 return print(
-                    serde_json::json!({"namespace":report.namespace,"sequence":report.sequence,"objects_per_backend":report.objects_per_backend,"protected_backends":report.backends.len(),"report_saved":true,"retain_until":until}),
+                    serde_json::json!({"namespace":report.namespace,"sequence":report.sequence,"objects_per_backend":report.objects_per_backend,"protected_backends":report.backends.len(),"report_saved":true,"retain_until":until,"storage":target}),
                 );
             }
             anyhow::ensure!(
                 dr_storage.is_none() && retain_days.is_none() && report.is_none(),
                 "protected options require immutable storage configuration"
             );
-            let operator = config.operator()?;
+            let store = config.store()?;
             let report = tokio::runtime::Runtime::new()?.block_on(
-                bunker::checkpoint::replicate(&repo, &operator, snapshot.as_deref()),
+                bunker::checkpoint::replicate(&repo, &store, snapshot.as_deref()),
+            )?;
+            let target = config.target_summary();
+            repo.audit(
+                "replicated",
+                serde_json::json!({"namespace":report.namespace,"storage":target,"immutable":false}),
             )?;
             let mut value = serde_json::to_value(report)?;
             value["immutable"] = serde_json::Value::Bool(false);
+            value["storage"] = target;
             print(value)
         }
         Command::Init

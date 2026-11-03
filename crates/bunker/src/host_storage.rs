@@ -426,7 +426,7 @@ impl HostStorageAdapter {
                     }
                 })?;
             } else {
-                let backend = primary.operator()?;
+                let backend = primary.store()?;
                 let runtime = tokio::runtime::Runtime::new()?;
                 runtime.block_on(async {
                     if let Some(receipt) = receipt {
@@ -540,7 +540,7 @@ fn preflight(config: &HostStorageConfig) -> Result<()> {
                 "consumer state only supported for Drive/OneDrive"
             );
             // Constructor validates explicit credentials and prevents ambient provider discovery.
-            primary.operator()?;
+            primary.store()?;
         }
     }
     Ok(())
