@@ -777,6 +777,9 @@ export async function handle(request: Request): Promise<Response> {
       if (resource === "policies" && method === "POST") {
         permit(a, ["admin", "operator"]);
         const data = await body(request, S.policy);
+        // Fail closed like the host: never record an unenforceable protection.
+        const unsupported = S.storageProtectionError(data);
+        if (unsupported) throw new ApiError(400, unsupported);
         if (
           data.channels.includes("webhook") &&
           !destinations().some((d) => d.tenantId === a.tenant)
@@ -1053,6 +1056,13 @@ export async function handle(request: Request): Promise<Response> {
               [a.tenant],
             )
           ).rows;
+        // Acknowledgement time comes from the append-only audit record.
+        report.alerts = (
+          await db.query(
+            "SELECT a.*,a.acknowledged_by IS NOT NULL AS acknowledged,ack.acknowledged_at FROM alerts a LEFT JOIN (SELECT resource_id,max(created_at) AS acknowledged_at FROM audit WHERE tenant_id=$1 AND action='alert.acknowledged' GROUP BY resource_id) ack ON ack.resource_id=a.id WHERE a.tenant_id=$1 ORDER BY a.created_at DESC LIMIT 10000",
+            [a.tenant],
+          )
+        ).rows;
         await audit(db, a, "evidence.exported");
         return json(report, 200, {
           "Content-Disposition": 'attachment; filename="bunker-evidence.json"',

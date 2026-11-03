@@ -178,6 +178,18 @@ export const evidence = z.strictObject({
   mcps: z.array(probe({ name: label })).max(100),
 });
 export type Policy = z.infer<typeof policy>;
+/** Host protected storage verifies S3 Object Lock and Azure version immutability only. */
+export const lockCapableStorage: readonly Policy["storage"][] = ["s3", "azure"];
+export function storageProtectionError(
+  p: Pick<Policy, "storage" | "immutable" | "drCopy">,
+): string | null {
+  if (!p.immutable && !p.drCopy) return null;
+  if (!lockCapableStorage.includes(p.storage))
+    return `${p.storage} storage does not support object lock or immutability; immutable and disaster recovery copies require s3 or azure`;
+  if (p.drCopy && !p.immutable)
+    return "A disaster recovery copy requires immutable primary storage";
+  return null;
+}
 
 export const certificateRequest = z.strictObject({
   csr: z.string().min(100).max(16384),

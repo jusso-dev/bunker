@@ -8654,7 +8654,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Each save increments version. Hosts see the new version on their next poll. immutable and drCopy require s3 or azure storage (S3 Object Lock or Azure version immutability); other storage returns 400. drCopy requires immutable."
       },
       "get": {
         "operationId": "get_tenants_tenantId_policies",
@@ -24121,6 +24122,196 @@
               "additionalProperties": false
             }
           },
+          "alerts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "tenant_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "host_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "dedupe_key": {
+                  "type": "string"
+                },
+                "body": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "eventId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "mass-delete",
+                            "force-push",
+                            "history-rewrite",
+                            "mcp-change",
+                            "skill-change",
+                            "backup-failed",
+                            "backup-missed",
+                            "restore-test-failed"
+                          ]
+                        },
+                        "severity": {
+                          "type": "string",
+                          "enum": [
+                            "warning",
+                            "critical"
+                          ]
+                        },
+                        "snapshotId": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "count": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10000000
+                        }
+                      },
+                      "required": [
+                        "eventId",
+                        "type",
+                        "severity",
+                        "snapshotId",
+                        "count"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "mass-delete",
+                            "force-push",
+                            "history-rewrite",
+                            "mcp-change",
+                            "skill-change",
+                            "backup-failed",
+                            "backup-missed",
+                            "restore-test-failed"
+                          ]
+                        },
+                        "severity": {
+                          "type": "string",
+                          "enum": [
+                            "warning",
+                            "critical"
+                          ]
+                        },
+                        "snapshotId": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "count": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10000000
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "severity",
+                        "snapshotId",
+                        "count"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "occurrences": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "acknowledged_by": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "last_seen_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "acknowledged": {
+                  "type": "boolean"
+                },
+                "acknowledged_at": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "tenant_id",
+                "host_id",
+                "created_at",
+                "dedupe_key",
+                "body",
+                "occurrences",
+                "acknowledged_by",
+                "last_seen_at",
+                "acknowledged",
+                "acknowledged_at"
+              ],
+              "additionalProperties": false
+            }
+          },
           "audit": {
             "type": "array",
             "items": {
@@ -24179,6 +24370,7 @@
           "snapshots",
           "policies",
           "evidence",
+          "alerts",
           "audit"
         ],
         "additionalProperties": false
