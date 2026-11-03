@@ -23,6 +23,13 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Require a release tag
+        # Bootstraps verify provenance against refs/tags/v<version>; refuse other refs.
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || { echo "dispatch packages.yml from a v<version> release tag, not $REF" >&2; exit 1; }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:

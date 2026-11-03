@@ -83,7 +83,11 @@ def bootstrap(version, prefix, release_base=None):
         if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), digest):
             raise ValueError('archive checksum mismatch')
         if shutil.which('gh'):
-            subprocess.run(['gh', 'attestation', 'verify', str(archive), '--repo', REPOSITORY], check=True)
+            # Bind provenance to the release tag and packaging workflow, not just the
+            # repository, so a mirror cannot substitute another attested build.
+            subprocess.run(['gh', 'attestation', 'verify', str(archive), '--repo', REPOSITORY,
+                            '--signer-workflow', f'{REPOSITORY}/.github/workflows/packages.yml',
+                            '--source-ref', f'refs/tags/v{version}'], check=True)
         else:
             print('gh unavailable: verified SHA-256 only; release provenance was not verified.', file=sys.stderr)
         # Read only the installer member from the bytes already verified. Never extract paths.

@@ -103,7 +103,10 @@ export type OnboardingStep = {
   commands: string[];
 };
 const repo = "/absolute/repository",
-  hostConfig = "/absolute/host.toml";
+  hostConfig = "/absolute/host.toml",
+  storageConfig = "/secure/bunker/primary-storage.toml",
+  // Every command that opens the repository must repeat the unlock configuration.
+  bunkerRepo = `bunker --repo ${repo} --key-config /secure/bunker/keys.toml`;
 /** Checklist state from live tenant data. References only; the host verifies them. */
 export function onboardingSteps(state: {
   policies: { body: Policy }[];
@@ -126,7 +129,7 @@ export function onboardingSteps(state: {
         : "No policy saved. Save a policy naming the storage reference configured on the host.",
       commands: [
         `# ${hostConfig}: storage_ref = "${policy?.storageRef ?? "STORAGE_REF"}"`,
-        `bunker --repo ${repo} replicate --storage /secure/bunker/primary-storage.toml`,
+        `# ${storageConfig}: service, [options] and [credential_env] names only (no secret values)`,
       ],
     },
     {
@@ -138,7 +141,7 @@ export function onboardingSteps(state: {
         : "No policy saved. Save a policy naming the key reference configured on the host.",
       commands: [
         `# ${hostConfig}: key_ref = "${policy?.keyRef ?? "KEY_REF"}"`,
-        `bunker --repo ${repo} --key-config /secure/bunker/keys.toml init`,
+        `${bunkerRepo} init`,
       ],
     },
     {
@@ -162,7 +165,8 @@ export function onboardingSteps(state: {
           ? "Snapshots were reported but none succeeded. Check the host log."
           : "No snapshot reported yet.",
       commands: [
-        `bunker --repo ${repo} host --config ${hostConfig} run --workspace /absolute/workspace --once`,
+        `${bunkerRepo} host --config ${hostConfig} run --workspace /absolute/workspace --once`,
+        `${bunkerRepo} replicate --storage ${storageConfig}`,
       ],
     },
   ];

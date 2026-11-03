@@ -199,9 +199,27 @@ test("onboarding checklist follows live policy, host and snapshot state", () => 
       ["backup", false],
     ],
   );
+  // Storage is configuration only; repository commands follow key setup.
+  assert.ok(empty[0].commands.every((c) => c.startsWith("# ")));
   assert.ok(
-    empty.every((s) => s.commands.some((c) => c.startsWith("bunker "))),
+    empty.slice(1).every((s) => s.commands.some((c) => c.startsWith("bunker "))),
   );
+  // Every command opening the repository repeats the same unlock configuration,
+  // and replication runs only after the first backup exists.
+  const repoCommands = empty
+    .flatMap((s) => s.commands)
+    .filter((c) => c.includes("--repo "));
+  assert.ok(repoCommands.length >= 3);
+  assert.ok(
+    repoCommands.every((c) =>
+      c.startsWith(
+        "bunker --repo /absolute/repository --key-config /secure/bunker/keys.toml ",
+      ),
+    ),
+  );
+  assert.match(empty[1].commands[1], / init$/);
+  assert.match(empty[3].commands[0], / run --workspace \/absolute\/workspace --once$/);
+  assert.match(empty[3].commands[1], / replicate --storage /);
   assert.match(
     empty[2].commands[0],
     /^bunker host --config \/absolute\/host\.toml enroll --token-env BUNKER_ENROLLMENT_TOKEN$/,

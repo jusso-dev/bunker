@@ -140,7 +140,10 @@ class ReleaseBootstrap(unittest.TestCase):
                 self.assertEqual((self.prefix / 'bin' / binary).read_bytes(), b'fixture binary')
                 self.assertEqual(self.calls[-1][1:3], ['attestation', 'verify'])
                 self.assertEqual(pathlib.Path(self.calls[-1][3]).name, archive.name)
-                self.assertEqual(self.calls[-1][-2:], ['--repo', 'jusso-dev/bunker'])
+                self.assertEqual(self.calls[-1][4:], [
+                    '--repo', 'jusso-dev/bunker',
+                    '--signer-workflow', 'jusso-dev/bunker/.github/workflows/packages.yml',
+                    '--source-ref', 'refs/tags/v1.2.3'])
 
     def test_checksum_and_attestation_fail_before_installer_execution(self):
         archive, sums = self.fixture(bootstrap.target())
@@ -188,7 +191,9 @@ class ReleaseBootstrap(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.prefix / 'bin' / ('bunker.exe' if os.name == 'nt' else 'bunker')).read_bytes(), b'fixture binary')
         self.assertIn('attestation verify', log.read_text())
-        self.assertIn('--repo jusso-dev/bunker', log.read_text())
+        self.assertIn('--repo jusso-dev/bunker --signer-workflow '
+                      'jusso-dev/bunker/.github/workflows/packages.yml '
+                      '--source-ref refs/tags/v1.2.3', log.read_text())
         shutil.rmtree(self.prefix)
         env['FIXTURE_GH_EXIT'] = '1'
         self.assertNotEqual(subprocess.run(command, env=env, capture_output=True).returncode, 0)

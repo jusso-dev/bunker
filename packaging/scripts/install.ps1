@@ -38,7 +38,10 @@ try {
         throw 'Archive checksum mismatch'
     }
     if (Get-Command gh -ErrorAction SilentlyContinue) {
-        & gh attestation verify $archive --repo jusso-dev/bunker
+        # Bind provenance to the release tag and packaging workflow, not just the repository.
+        & gh attestation verify $archive --repo jusso-dev/bunker `
+            --signer-workflow jusso-dev/bunker/.github/workflows/packages.yml `
+            --source-ref "refs/tags/v$Version"
         if ($LASTEXITCODE -ne 0) { throw 'Release attestation verification failed' }
     } else {
         Write-Warning 'gh unavailable: verified SHA-256 only; release provenance was not verified.'

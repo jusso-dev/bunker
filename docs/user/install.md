@@ -16,7 +16,7 @@ The manually dispatched `Attested package candidates` workflow builds Linux x86-
 
 Build a candidate locally with `cargo build --locked --release --package bunker --target TARGET`, then `python3 packaging/scripts/package.py --target TARGET --output /tmp/bunker-packages`. The target must be installed in Rust. No signing or network publication occurs.
 
-Download a candidate and its checksum through a trusted channel. Verify its GitHub provenance, when available, using `gh attestation verify ARCHIVE --repo jusso-dev/bunker`. A checksum downloaded with a malicious archive does not establish authenticity. After independent verification, install from the local archive:
+Download a candidate and its checksum through a trusted channel. Verify its GitHub provenance, when available, using `gh attestation verify ARCHIVE --repo jusso-dev/bunker --signer-workflow jusso-dev/bunker/.github/workflows/packages.yml --source-ref refs/tags/vVERSION`; the workflow and tag constraints reject an attested build from another branch or release. A checksum downloaded with a malicious archive does not establish authenticity. After independent verification, install from the local archive:
 
 ```sh
 python3 packaging/scripts/install.py --archive "$ARCHIVE" --sha256 "$EXPECTED_SHA256" --prefix "$HOME/.local"
@@ -34,8 +34,9 @@ curl -fsSL https://raw.githubusercontent.com/jusso-dev/bunker/v0.1.0/packaging/s
 The initial bootstrap code must itself come from a trusted, reviewed tag. To inspect
 it first, download it to a file before running it. It selects Linux x86-64 GNU or
 macOS arm64/x86-64, downloads the release archive and its `.sha256`, checks the exact
-archive name and digest, runs `gh attestation verify --repo jusso-dev/bunker` when
-`gh` is present, then delegates to the archive's verified `install.py`. A failed
+archive name and digest, runs `gh attestation verify` bound to this repository, the
+`packages.yml` signing workflow and `refs/tags/v<version>` when `gh` is present
+(the packaging workflow refuses to run from any other ref), then delegates to the archive's verified `install.py`. A failed
 attestation stops installation. Without `gh`, it prints an explicit warning and
 checks only SHA-256; use a trusted independent checksum in that case. Python 3 and
 CA trust roots are prerequisites. These commands require a published release;

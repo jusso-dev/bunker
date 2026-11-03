@@ -314,14 +314,32 @@ export function Console() {
   async function openTimelineLink(link: TimelineLink, available: Tenant[]) {
     setError("");
     setNotice("");
-    if (!available.some((t) => t.id === link.tenantId)) {
+    const generation = sessionGeneration.current;
+    // Memberships are paginated; follow every page before declaring the tenant
+    // inaccessible. The server still authorizes the snapshot read itself.
+    let known = available;
+    if (!known.some((t) => t.id === link.tenantId)) {
+      let cursor: string | null = null;
+      for (let page = 0; page < 100; page++) {
+        const result: {
+          data: components["schemas"]["meResponse"];
+          next: string | null;
+        } = await apiPage<components["schemas"]["meResponse"]>("me", cursor);
+        if (generation !== sessionGeneration.current) return;
+        known = mergeRows(known, result.data.tenants);
+        cursor = result.next;
+        if (!cursor || known.some((t) => t.id === link.tenantId)) break;
+      }
+      setTenants(known);
+      setTenantCursor(cursor);
+    }
+    if (!known.some((t) => t.id === link.tenantId)) {
       setError("The linked snapshot belongs to a tenant you cannot access.");
       return;
     }
     if (link.tenantId !== tenantId) switchTenant(link.tenantId);
     setSection("Timeline");
     setSelected(null);
-    const generation = sessionGeneration.current;
     try {
       const rows = await api<Snapshot[]>(
         `tenants/${link.tenantId}/snapshots/${link.snapshotId}`,
