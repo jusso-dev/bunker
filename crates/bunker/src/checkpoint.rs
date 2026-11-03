@@ -376,9 +376,7 @@ pub async fn recover(
     )?;
     drop(repo);
     storage::publish_recovery(staging.path(), destination)?;
-    cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?
-        .into_std_file()
-        .sync_all()?;
+    crate::repository::sync_ambient_dir(parent)?;
     Ok(snapshots.len())
 }
 

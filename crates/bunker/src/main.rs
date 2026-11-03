@@ -358,9 +358,7 @@ fn write_review_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     temporary
         .persist_noclobber(path)
         .map_err(|_| anyhow::anyhow!("review document destination exists or cannot be written"))?;
-    cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?
-        .into_std_file()
-        .sync_all()?;
+    bunker::repository::sync_ambient_dir(parent)?;
     Ok(())
 }
 fn parse_agent(value: &str) -> Result<bunker_discovery::AgentId> {
@@ -1201,7 +1199,9 @@ fn run() -> Result<()> {
             let report = tokio::runtime::Runtime::new()?.block_on(
                 bunker::checkpoint::replicate(&repo, &operator, snapshot.as_deref()),
             )?;
-            print(report)
+            let mut value = serde_json::to_value(report)?;
+            value["immutable"] = serde_json::Value::Bool(false);
+            print(value)
         }
         Command::Init
         | Command::SessionRun { .. }

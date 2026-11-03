@@ -683,8 +683,7 @@ impl Repository {
         }
         // Each new chunk has synced file data; publish the directory once before
         // any manifest can reference those chunks.
-        #[cfg(unix)]
-        self.dir.open_dir("chunks")?.into_std_file().sync_all()?;
+        sync_dir(&self.dir, Path::new("chunks"))?;
         let plaintext = Zeroizing::new(serde_json::to_vec(&manifest)?);
         ensure!(
             plaintext.len() as u64 + 40 <= MAX_MANIFEST,
@@ -1311,11 +1310,39 @@ fn sync_parents(dir: &Dir, parent: &Path) -> Result<()> {
         } else {
             &current
         };
-        dir.open_dir(target)?.into_std_file().sync_all()?;
+        sync_dir(dir, target)?;
         if !current.pop() {
             break;
         }
     }
+    Ok(())
+}
+/// Persist directory entries. `Dir::open_dir` uses `O_PATH` on Linux, which
+/// cannot be fsynced (EBADF), so reopen readable. Windows has no directory
+/// fsync; NTFS journals the metadata and directory handles reject flushes.
+pub(crate) fn sync_dir(dir: &Dir, path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use cap_fs_ext::OpenOptionsMaybeDirExt;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .maybe_dir(true)
+            .follow(FollowSymlinks::No);
+        let file = dir.open_with(path, &options)?;
+        ensure!(file.metadata()?.is_dir(), "expected a directory");
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = (dir, path);
+    Ok(())
+}
+/// Like [`sync_dir`] for a directory addressed by an ambient path.
+pub fn sync_ambient_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> Result<()> {

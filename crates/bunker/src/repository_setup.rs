@@ -396,8 +396,7 @@ impl Repository {
             );
             manifests.push((manifest, plaintext));
         }
-        #[cfg(unix)]
-        self.dir.open_dir("chunks")?.into_std_file().sync_all()?;
+        super::sync_dir(&self.dir, Path::new("chunks"))?;
         for (manifest, plaintext) in &manifests {
             atomic_write(
                 &self.dir,

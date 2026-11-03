@@ -115,7 +115,7 @@ committed schema change; the final migration Job completed successfully.
 This is control-plane deployment evidence, not whole-product acceptance. Real
 host enrollment/capture, external storage providers, native agents, database
 restore drills, HA and disaster recovery remain separate acceptance work. See the
-[EKS runbook](../deploy/eks/README.md) for operations and limitations.
+[EKS runbook](https://github.com/jusso-dev/bunker/blob/main/deploy/eks/README.md) for operations and limitations.
 
 The [GitHub CI run for application commit 0c0d4ea](https://github.com/jusso-dev/bunker/actions/runs/40974792833)
 is not green: Windows Clippy, Linux Rust tests, the macOS restore smoke and the

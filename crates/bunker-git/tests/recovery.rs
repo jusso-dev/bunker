@@ -1061,6 +1061,7 @@ fn packed_unicode_ref_aliases_and_ancestor_aliases_refuse_before_mutation() {
     }
 }
 
+#[cfg(unix)] // Unix permission modes and a shell wrapper for Git.
 #[test]
 fn failed_ref_guards_restore_isolated_config_but_preserve_later_config_edits() {
     use std::os::unix::fs::PermissionsExt;
@@ -1152,6 +1153,7 @@ fn failed_ref_guards_restore_isolated_config_but_preserve_later_config_edits() {
     }
 }
 
+#[cfg(unix)] // Unix permission modes and a shell wrapper for Git.
 #[test]
 fn failed_rollback_plumbing_cleans_config_and_rechecks_for_intervening_edits() {
     use std::os::unix::fs::PermissionsExt;

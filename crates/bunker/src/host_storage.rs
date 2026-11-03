@@ -895,7 +895,7 @@ impl Custody {
         Ok(Some(bytes))
     }
     fn sync(&self) -> Result<()> {
-        self.dir.try_clone()?.into_std_file().sync_all()?;
+        crate::repository::sync_dir(&self.dir, std::path::Path::new("."))?;
         Ok(())
     }
     fn write(&self, name: &str, bytes: &[u8]) -> Result<()> {

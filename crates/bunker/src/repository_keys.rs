@@ -288,9 +288,7 @@ impl Repository {
             });
         }
         crate::storage::publish_recovery(staging.path(), path)?;
-        Dir::open_ambient_dir(parent, ambient_authority())?
-            .into_std_file()
-            .sync_all()?;
+        super::sync_ambient_dir(parent)?;
         let root = path.canonicalize()?;
         Ok(Self {
             root,

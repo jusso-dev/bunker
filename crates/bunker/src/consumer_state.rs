@@ -151,7 +151,7 @@ impl ConsumerState {
         let reports = self.dir.open_dir_nofollow("reports")?;
         // Persist the directory entry itself before a report can authorize local
         // checkpoint advancement. Syncing only the new child is insufficient.
-        self.dir.try_clone()?.into_std_file().sync_all()?;
+        crate::repository::sync_dir(&self.dir, std::path::Path::new("."))?;
         crate::repository::atomic_write(
             &reports,
             &format!("{checkpoint}.json"),
@@ -257,7 +257,7 @@ impl RefreshTokenSink for ConsumerState {
             if self.read("refresh-pending", 64)?.is_some() {
                 self.dir.remove_file("refresh-pending")?;
             }
-            self.dir.try_clone()?.into_std_file().sync_all()?;
+            crate::repository::sync_dir(&self.dir, std::path::Path::new("."))?;
             Ok(())
         })()
         .map_err(|_| PersistenceError)

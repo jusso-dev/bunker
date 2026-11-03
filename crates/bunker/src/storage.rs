@@ -447,9 +447,7 @@ pub async fn recover_legacy_with_key_source(
     ensure!(count > 0, "remote repository contains no snapshots");
     drop(repo);
     publish_recovery(staging.path(), destination)?;
-    cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?
-        .into_std_file()
-        .sync_all()?;
+    crate::repository::sync_ambient_dir(parent)?;
     Ok(count)
 }
 

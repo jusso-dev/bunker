@@ -622,14 +622,14 @@ impl Repository {
             for id in ids {
                 dir.remove_file(id)?;
             }
-            dir.try_clone()?.into_std_file().sync_all()?;
+            super::sync_dir(dir, Path::new("."))?;
         }
         for path in &plan.temporary_files {
             let (category, name) = path.split_once('/').context("invalid temporary path")?;
             inv.dirs[category].remove_file(name)?;
         }
         for dir in inv.dirs.values() {
-            dir.try_clone()?.into_std_file().sync_all()?;
+            super::sync_dir(dir, Path::new("."))?;
         }
         // Keep a normal encrypted audit record. Failure retains the deletion journal,
         // making incomplete finalization visible to the next operator dry run.
@@ -644,7 +644,7 @@ impl Repository {
             false,
         )?;
         self.dir.remove_file(JOURNAL)?;
-        self.dir.try_clone()?.into_std_file().sync_all()?;
+        super::sync_dir(&self.dir, Path::new("."))?;
         Ok(MaintenanceReport {
             snapshots_removed: plan.snapshots.len(),
             chunks_removed: plan.chunks.len(),
