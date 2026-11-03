@@ -82,6 +82,13 @@ pub struct Manifest {
     pub git: Option<GitArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<SetupScope>,
+    /// Keyed hash of the canonical captured workspace path; absent on legacy and setup
+    /// manifests. Binds session rollback to one workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Capture time in nanoseconds, ordering captures within one second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_nanos: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiagnostic {
@@ -389,6 +396,18 @@ impl Repository {
         manifests.sort_by_key(|m| (m.created_at, m.id.clone()));
         Ok(manifests)
     }
+    /// Keyed identity of a canonical workspace path; never reveals the path itself.
+    pub fn workspace_identity(&self, canonical: &Path) -> Result<String> {
+        Ok(blake3::keyed_hash(
+            &self.key,
+            &serde_json::to_vec(&(
+                "bunker-workspace-identity-v1",
+                canonical.as_os_str().as_encoded_bytes(),
+            ))?,
+        )
+        .to_hex()
+        .to_string())
+    }
     pub fn snapshot(
         &self,
         workspace: &Path,
@@ -423,10 +442,13 @@ impl Repository {
             default_includes: policy.default_includes.clone(),
             ..Default::default()
         })?;
+        let captured_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
         let mut manifest = Manifest {
             version: FORMAT_VERSION,
             id: hex::encode(crypto::random::<32>()),
-            created_at: now(),
+            created_at: captured_at.as_secs(),
             agent,
             session,
             trigger: trigger.into(),
@@ -437,6 +459,8 @@ impl Repository {
             bytes: 0,
             git: None,
             setup: None,
+            workspace: Some(self.workspace_identity(&workspace)?),
+            created_at_nanos: Some(u64::try_from(captured_at.as_nanos()).unwrap_or(u64::MAX)),
         };
         // Hold cooperative exclusion through both Git and workspace capture.
         let _git_access = match git::ExclusiveAccess::optional(&workspace) {
@@ -807,6 +831,12 @@ impl Repository {
         ensure!(
             !destination.starts_with(&self.root) && !self.root.starts_with(&destination),
             "cannot restore into or around the repository"
+        );
+        ensure!(
+            manifest.trigger != SESSION_ROLLBACK
+                || manifest.workspace.is_some()
+                    && manifest.workspace == Some(self.workspace_identity(&destination)?),
+            "session rollback belongs to another workspace; restore it only into the workspace its session captured"
         );
         let dir = Dir::open_ambient_dir(&destination, ambient_authority())?;
         let mut changes = vec![];
@@ -1388,17 +1418,21 @@ fn sync_parents(dir: &Dir, parent: &Path) -> Result<()> {
     Ok(())
 }
 /// Persist directory entries. `Dir::open_dir` uses `O_PATH` on Linux, which
-/// cannot be fsynced (EBADF), so reopen readable. Windows has no directory
-/// fsync; NTFS journals the metadata and directory handles reject flushes.
+/// cannot be fsynced (EBADF), so reopen readable. `O_DIRECTORY | O_NONBLOCK`
+/// refuse (without blocking on) a FIFO or other non-directory planted at the
+/// path. Windows has no directory fsync; NTFS journals the metadata and
+/// directory handles reject flushes.
 pub(crate) fn sync_dir(dir: &Dir, path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use cap_fs_ext::OpenOptionsMaybeDirExt;
+        use cap_std::fs::OpenOptionsExt;
         let mut options = OpenOptions::new();
         options
             .read(true)
             .maybe_dir(true)
-            .follow(FollowSymlinks::No);
+            .follow(FollowSymlinks::No)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK);
         let file = dir.open_with(path, &options)?;
         ensure!(file.metadata()?.is_dir(), "expected a directory");
         file.sync_all()?;
@@ -1410,7 +1444,15 @@ pub(crate) fn sync_dir(dir: &Dir, path: &Path) -> Result<()> {
 /// Like [`sync_dir`] for a directory addressed by an ambient path.
 pub fn sync_ambient_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
-    std::fs::File::open(path)?.sync_all()?;
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
+            .open(path)?;
+        ensure!(file.metadata()?.is_dir(), "expected a directory");
+        file.sync_all()?;
+    }
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
@@ -1475,6 +1517,30 @@ fn destination_state(dir: &Dir, path: &str) -> Result<Option<(String, u64, bool)
 #[cfg(test)]
 mod review_tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_refuses_a_planted_fifo_without_blocking() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let fifo =
+            std::ffi::CString::new(root.join("fifo").as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = root.clone();
+        std::thread::spawn(move || {
+            let dir = Dir::open_ambient_dir(&path, ambient_authority()).unwrap();
+            let _ = sender.send((
+                sync_dir(&dir, Path::new("fifo")).is_err(),
+                sync_ambient_dir(&path.join("fifo")).is_err(),
+                sync_dir(&dir, Path::new(".")).is_ok() && sync_ambient_dir(&path).is_ok(),
+            ));
+        });
+        let (relative, ambient, directory) = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("directory sync blocked opening a FIFO");
+        assert!(relative && ambient, "FIFO accepted as a directory");
+        assert!(directory, "real directory no longer syncs");
+    }
     #[test]
     fn legacy_manifest_without_reference_metadata_still_requires_rebind_opt_in() {
         let root = tempfile::tempdir().unwrap();

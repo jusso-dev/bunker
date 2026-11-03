@@ -515,6 +515,14 @@ test(
           ).response.status,
           400,
         );
+        // A missed threshold inside interval plus jitter alerts on every on-time backup.
+        const alwaysMissed = await call(
+          path("policies"),
+          { ...policy, missedBackupMinutes: 60 },
+          operator,
+        );
+        assert.equal(alwaysMissed.response.status, 400);
+        assert.match(alwaysMissed.data.error, /every on-time backup/);
         assert.equal(
           (
             await call(

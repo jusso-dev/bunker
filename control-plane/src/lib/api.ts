@@ -778,7 +778,8 @@ export async function handle(request: Request): Promise<Response> {
         permit(a, ["admin", "operator"]);
         const data = await body(request, S.policy);
         // Fail closed like the host: never record an unenforceable protection.
-        const unsupported = S.storageProtectionError(data);
+        const unsupported =
+          S.storageProtectionError(data) ?? S.missedBackupError(data);
         if (unsupported) throw new ApiError(400, unsupported);
         if (
           data.channels.includes("webhook") &&

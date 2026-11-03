@@ -12,7 +12,11 @@ import {
   parseTimelineHref,
   timelineHref,
 } from "../src/lib/console-state";
-import { storageProtectionError, type Policy } from "../src/lib/schemas";
+import {
+  missedBackupError,
+  storageProtectionError,
+  type Policy,
+} from "../src/lib/schemas";
 
 const tenant = "11111111-1111-4111-8111-111111111111";
 const hostA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -202,7 +206,9 @@ test("onboarding checklist follows live policy, host and snapshot state", () => 
   // Storage is configuration only; repository commands follow key setup.
   assert.ok(empty[0].commands.every((c) => c.startsWith("# ")));
   assert.ok(
-    empty.slice(1).every((s) => s.commands.some((c) => c.startsWith("bunker "))),
+    empty
+      .slice(1)
+      .every((s) => s.commands.some((c) => c.startsWith("bunker "))),
   );
   // Every command opening the repository repeats the same unlock configuration,
   // and replication runs only after the first backup exists.
@@ -218,7 +224,10 @@ test("onboarding checklist follows live policy, host and snapshot state", () => 
     ),
   );
   assert.match(empty[1].commands[1], / init$/);
-  assert.match(empty[3].commands[0], / run --workspace \/absolute\/workspace --once$/);
+  assert.match(
+    empty[3].commands[0],
+    / run --workspace \/absolute\/workspace --once$/,
+  );
   assert.match(empty[3].commands[1], / replicate --storage /);
   assert.match(
     empty[2].commands[0],
@@ -242,6 +251,26 @@ test("onboarding checklist follows live policy, host and snapshot state", () => 
       hosts: [{}],
       snapshots: [{ body: { status: "succeeded" } }],
     }).every((s) => s.done),
+  );
+});
+
+test("missed backup threshold must exceed interval plus jitter", () => {
+  // Reproduction: a threshold equal to the interval alerts on every on-time cycle.
+  assert.match(
+    missedBackupError({ intervalMinutes: 60, missedBackupMinutes: 60 })!,
+    /more than 61 minutes/,
+  );
+  assert.match(
+    missedBackupError({ intervalMinutes: 60, missedBackupMinutes: 61 })!,
+    /every on-time backup/,
+  );
+  assert.equal(
+    missedBackupError({ intervalMinutes: 60, missedBackupMinutes: 62 }),
+    null,
+  );
+  assert.equal(
+    missedBackupError({ intervalMinutes: 60, missedBackupMinutes: 90 }),
+    null,
   );
 });
 

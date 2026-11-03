@@ -5,6 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Scheduler tick slack added to the latest on-time cycle before a backup counts as missed.
+pub const MISSED_BACKUP_GRACE_SECONDS: u64 = 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
@@ -106,9 +109,14 @@ impl Policy {
         }
         Ok(())
     }
-    /// Seconds after the last success at which a backup counts as missed.
+    /// Seconds after the last success at which a backup counts as missed. Never earlier
+    /// than the latest on-time cycle (interval + jitter + one minute of tick grace), so a
+    /// threshold at or below the cadence cannot alert on every on-time capture.
     pub fn missed_backup_after(&self) -> u64 {
-        let due = self.interval_seconds.saturating_add(self.jitter_seconds);
-        self.missed_backup_seconds.unwrap_or(due.saturating_add(60))
+        let on_time = self
+            .interval_seconds
+            .saturating_add(self.jitter_seconds)
+            .saturating_add(MISSED_BACKUP_GRACE_SECONDS);
+        self.missed_backup_seconds.unwrap_or(0).max(on_time)
     }
 }

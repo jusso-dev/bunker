@@ -30,8 +30,12 @@ pub struct ScheduleState {
     pub last_setup_error: Option<String>,
     pub setup_diagnostics: Vec<SetupDiagnostic>,
     pub pending_missed_backup: Option<u64>,
-    /// Last success whose miss is already recorded; one record per missed window.
+    /// Baseline (last success, or `created_at` before any) whose miss is already
+    /// recorded; one record per missed window.
     pub missed_backup_for: Option<u64>,
+    /// When this schedule was bound to its workspace; a schedule that never succeeds
+    /// is measured from here.
+    pub created_at: u64,
     pub failures: u32,
     pub last_error: Option<String>,
     pub retry_after: u64,
@@ -156,23 +160,29 @@ pub fn next_due(from: u64, policy: &Policy) -> u64 {
     from.saturating_add(policy.interval_seconds)
         .saturating_add(rand::thread_rng().gen_range(0..=policy.jitter_seconds))
 }
-/// Durably note one missed backup per last success once the policy threshold has passed.
-pub fn missed_backup_due(last_success: u64, recorded_for: Option<u64>, policy: &Policy) -> bool {
-    last_success > 0
-        && recorded_for != Some(last_success)
-        && now() >= last_success.saturating_add(policy.missed_backup_after())
+/// Durably note one missed backup per baseline once the policy threshold has passed.
+/// `since` is the last success, or when the schedule was created if it never succeeded.
+pub fn missed_backup_due(since: u64, recorded_for: Option<u64>, policy: &Policy) -> bool {
+    since > 0
+        && recorded_for != Some(since)
+        && now() >= since.saturating_add(policy.missed_backup_after())
 }
 fn note_missed_backup(state: &mut ScheduleState, policy: &Policy) -> bool {
+    let since = if state.last_success > 0 {
+        state.last_success
+    } else {
+        state.created_at
+    };
     if state.pending_missed_backup.is_some()
-        || !missed_backup_due(state.last_success, state.missed_backup_for, policy)
+        || !missed_backup_due(since, state.missed_backup_for, policy)
     {
         return false;
     }
-    state.pending_missed_backup = Some(state.last_success);
-    state.missed_backup_for = Some(state.last_success);
+    state.pending_missed_backup = Some(since);
+    state.missed_backup_for = Some(since);
     crate::logging::warn(
         "backup missed",
-        serde_json::json!({"event":"backup_missed","last_success":state.last_success,"threshold_seconds":policy.missed_backup_after()}),
+        serde_json::json!({"event":"backup_missed","last_success":state.last_success,"since":since,"threshold_seconds":policy.missed_backup_after()}),
     );
     true
 }
@@ -649,8 +659,14 @@ fn tick_inner(
             state.last_success = 0;
             state.next_run = 0;
             state.next_probe = 0;
+            state.created_at = now();
             persist(&state_path, state)?;
         }
+    }
+    if state.created_at == 0 {
+        // Bound before creation time was recorded: start measuring from now.
+        state.created_at = now();
+        persist(&state_path, state)?;
     }
     match Policy::load(policy_path) {
         Ok(policy) => {
@@ -979,8 +995,9 @@ mod schedule_tests {
         assert_eq!(policy.missed_backup_after(), 720);
         policy.missed_backup_seconds = Some(5400);
         assert_eq!(policy.missed_backup_after(), 5400);
+        // A threshold inside the on-time cadence would alert on every on-time cycle.
         policy.missed_backup_seconds = Some(60);
-        assert_eq!(policy.missed_backup_after(), 60);
+        assert_eq!(policy.missed_backup_after(), 720);
         policy.missed_backup_seconds = Some(59);
         assert!(policy.validate().is_err());
         let recent = now() - 100;
@@ -990,6 +1007,42 @@ mod schedule_tests {
         assert!(missed_backup_due(old, None, &policy));
         assert!(!missed_backup_due(old, Some(old), &policy));
         assert!(!missed_backup_due(0, None, &policy));
+    }
+
+    #[test]
+    fn standalone_never_successful_schedule_records_missed_backup_from_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("repo");
+        drop(Repository::init(&repo_path, "missed-fixture").unwrap());
+        let work = temp.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let policy_path = temp.path().join("policy.toml");
+        fs::write(
+            &policy_path,
+            "interval_seconds = 600\njitter_seconds = 0\nmissed_backup_seconds = 1800\n",
+        )
+        .unwrap();
+        let key = KeySource::passphrase("missed-fixture");
+        let created = now() - 2000;
+        let mut state = ScheduleState {
+            workspace: Some(work.canonicalize().unwrap()),
+            created_at: created,
+            next_run: now() + 3600,
+            ..ScheduleState::default()
+        };
+        tick_with_key_source(
+            &repo_path,
+            &key,
+            &work,
+            Some(&policy_path),
+            &mut state,
+            false,
+        )
+        .unwrap();
+        assert_eq!(state.last_success, 0);
+        assert_eq!(state.missed_backup_for, Some(created));
+        let repo = Repository::open(&repo_path, "missed-fixture").unwrap();
+        assert_eq!(repo.audit_details("missed_backup").unwrap().len(), 1);
     }
 
     #[test]

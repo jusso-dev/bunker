@@ -109,7 +109,7 @@ fn suspicious_value(value: &str) -> bool {
     }) {
         return true;
     }
-    if contains_sensitive_assignment(value) {
+    if contains_sensitive_assignment(value) || contains_sensitive_flag(value) {
         return true;
     }
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -288,6 +288,17 @@ fn contains_sensitive_assignment(value: &str) -> bool {
         &ASSIGNMENT,
     );
     assignment.captures_iter(value).any(|c| secret_key(&c[1]))
+}
+
+/// Command strings (for example Cursor `environment.json` install/start commands) can pass
+/// credentials as `--password VALUE` or `--api-key=VALUE`; the flag name marks the value.
+fn contains_sensitive_flag(value: &str) -> bool {
+    static FLAG: OnceLock<Regex> = OnceLock::new();
+    let flag = regex(
+        r#"(?:^|[\s\"'])--?([A-Za-z][A-Za-z0-9_.-]*)(?:=|\s+)[^\s-]"#,
+        &FLAG,
+    );
+    flag.captures_iter(value).any(|c| secret_key(&c[1]))
 }
 
 fn sanitize_text(input: &str, references: &mut Vec<SecretReference>) -> Result<String> {

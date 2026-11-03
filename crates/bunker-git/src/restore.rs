@@ -749,6 +749,29 @@ fn install_file(path: &Path, bytes: Option<&[u8]>) -> Result<()> {
     } else if path.exists() {
         fs::remove_file(path)?;
     }
-    fs::File::open(parent)?.sync_all()?;
+    sync_dir(parent)
+}
+/// Persist directory entries. Windows rejects flushing directory handles; NTFS journals
+/// the metadata, so this is a no-op there.
+fn sync_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_file_persists_and_removes_without_flushing_a_directory_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join(".git/index");
+        install_file(&path, Some(b"index")).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"index");
+        install_file(&path, None).unwrap();
+        assert!(!path.exists());
+    }
 }

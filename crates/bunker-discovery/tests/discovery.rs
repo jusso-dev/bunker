@@ -328,6 +328,43 @@ fn json_sanitizes_nested_secrets_env_headers_args_urls_and_preserves_refs() {
 }
 
 #[test]
+fn cursor_environment_commands_never_keep_inline_credentials() {
+    let input = br#"{
+        "install":"npm ci && npm login --password fake-flag-value",
+        "start":"API_TOKEN=fake-assignment-value npm start",
+        "build":{"context":".","dockerfile":"Dockerfile"},
+        "update":"tool sync --api-key=fake-equals-value --verbose",
+        "terminals":[{"name":"db","command":"psql postgres://fixture:fake-url-password@db.test/app"}],
+        "snapshot":"plain-snapshot-id"
+    }"#;
+    let result = sanitize(
+        input,
+        FileFormat::for_path(Path::new(".cursor/environment.json")),
+    )
+    .unwrap();
+    let text = String::from_utf8(result.bytes).unwrap();
+    for removed in [
+        "fake-flag-value",
+        "fake-assignment-value",
+        "fake-equals-value",
+        "fake-url-password",
+    ] {
+        assert!(!text.contains(removed), "{removed} leaked");
+    }
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["snapshot"], "plain-snapshot-id");
+    assert_eq!(parsed["build"]["dockerfile"], "Dockerfile");
+    assert!(result.modified);
+    // Flags without values and unrelated flags stay intact.
+    let plain = sanitize(
+        br#"{"start":"npm start --verbose --port 3000"}"#,
+        FileFormat::Json,
+    )
+    .unwrap();
+    assert!(!plain.modified);
+}
+
+#[test]
 fn toml_is_valid_after_sanitization() {
     let input = b"model = 'fixture-model'\n[mcp_servers.fixture]\napi_key = 'fake-toml-value'\n[mcp_servers.fixture.env]\nEXISTING = '${env:FIXTURE_KEY}'\n";
     let result = sanitize(input, FileFormat::Toml).unwrap();

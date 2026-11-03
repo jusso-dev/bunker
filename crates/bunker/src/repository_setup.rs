@@ -359,6 +359,8 @@ impl Repository {
                 bytes: 0,
                 git: None,
                 setup: Some(scope),
+                workspace: None,
+                created_at_nanos: None,
             };
             for file in files {
                 let bytes = Zeroizing::new(file.bytes);
