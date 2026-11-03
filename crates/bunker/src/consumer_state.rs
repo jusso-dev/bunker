@@ -80,6 +80,8 @@ impl ConsumerState {
                 "unsafe consumer state lock"
             );
         }
+        #[cfg(windows)]
+        crate::win_acl::check_file(&lock).context("unsafe consumer state lock")?;
         lock.try_lock_exclusive()
             .context("consumer state is busy")?;
         let state = Self {
@@ -217,6 +219,8 @@ impl ConsumerState {
                 "unsafe consumer state permissions"
             );
         }
+        #[cfg(windows)]
+        crate::win_acl::check_file(&file).context("unsafe consumer state permissions")?;
         let mut bytes = Zeroizing::new(Vec::new());
         file.take(limit + 1).read_to_end(&mut bytes)?;
         ensure!(bytes.len() as u64 <= limit, "consumer state exceeds limit");

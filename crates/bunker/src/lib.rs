@@ -16,3 +16,5 @@ pub mod restore_probes;
 pub mod scheduler;
 pub mod session_hooks;
 pub mod storage;
+#[cfg(windows)]
+mod win_acl;

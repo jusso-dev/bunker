@@ -227,7 +227,10 @@ fn protected_path(path: &Path, directory: bool) -> Result<()> {
 }
 #[cfg(not(unix))]
 fn protected_path(_: &Path, _: bool) -> Result<()> {
-    anyhow::bail!("protected probe configuration requires Unix ownership checks")
+    anyhow::bail!(
+        "container restore probes are supported only on Unix hosts; \
+         protected probe configuration cannot be validated on this platform"
+    )
 }
 
 #[derive(Debug, Clone, Copy)]

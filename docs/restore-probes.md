@@ -58,7 +58,8 @@ group/world-writable components (root-owned sticky ancestors are permitted).
 The loader caps it at 64 KiB and rejects unknown fields. Provision the containing
 directory as mode 0700 and the file as 0600. `DockerExecutor::new` also checks the
 explicit Docker configuration directory and resolved CLI binary's ownership.
-Platforms without the implemented Unix ownership checks fail closed.
+Restore probes are Unix-only: on Windows and other platforms, loading the probe
+configuration fails closed with an unsupported-platform error.
 
 The service account and operator are trusted: root/service-user code can change
 its own configuration. An attacker able to modify the service account's files

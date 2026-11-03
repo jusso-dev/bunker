@@ -10,7 +10,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -239,7 +239,7 @@ impl ConsumedRequests {
             .context("restore already consumed or durable claim state unavailable")?;
         file.write_all(b"consumed-before-claim-v1\n")?;
         file.sync_all()?;
-        File::open(&self.directory)?.sync_all()?;
+        crate::repository::sync_ambient_dir(&self.directory)?;
         Ok(())
     }
 }
@@ -267,7 +267,16 @@ fn destination_identity(path: &Path) -> Result<DestinationIdentity> {
             inode: meta.ino(),
         })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        ensure!(
+            crate::win_acl::same_path(path, &path.canonicalize()?),
+            "restore destination must remain canonical"
+        );
+        let (device, inode) = crate::win_acl::directory_identity(path)?;
+        Ok(DestinationIdentity { device, inode })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         bail!("destination identity validation not supported on this platform")

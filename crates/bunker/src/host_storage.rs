@@ -54,6 +54,8 @@ impl HostStorageConfig {
         if let Some(path) = &self.consumer_state {
             paths.push((path, true));
         }
+        // Compare resolved forms only; on Windows the configured spelling may differ.
+        let mut checked = Vec::with_capacity(paths.len());
         for (path, directory) in &paths {
             let path = checked_path(path, *directory)?;
             ensure!(
@@ -61,11 +63,12 @@ impl HostStorageConfig {
                 "host storage configuration/state must be disjoint from repository and workspace"
             );
             if path.exists() {
-                private_metadata(&fs::symlink_metadata(&path)?, *directory)?;
+                private_path(&path, *directory)?;
             }
+            checked.push(path);
         }
-        for (i, (a, _)) in paths.iter().enumerate() {
-            for (b, _) in &paths[i + 1..] {
+        for (i, a) in checked.iter().enumerate() {
+            for b in &checked[i + 1..] {
                 ensure!(
                     !overlaps(a, b),
                     "host storage configuration/state paths must be disjoint"
@@ -86,14 +89,14 @@ impl HostStorageConfig {
                     !overlaps(&root, &repository) && !overlaps(&root, &workspace),
                     "local replication destination must be disjoint from repository and workspace"
                 );
-                for (path, _) in &paths {
+                for path in &checked {
                     ensure!(
                         !overlaps(&root, path),
                         "local replication destination overlaps host storage state"
                     );
                 }
                 if root.exists() {
-                    private_metadata(&fs::symlink_metadata(&root)?, true)?;
+                    private_path(&root, true)?;
                 }
             }
         }
@@ -862,7 +865,7 @@ impl Custody {
             options.mode(0o600).custom_flags(libc::O_NONBLOCK);
         }
         let lock = dir.open_with("lock", &options)?.into_std();
-        private_metadata(&lock.metadata()?, false)?;
+        private_file(&lock)?;
         lock.try_lock_exclusive()
             .context("host storage custody is busy")?;
         Ok(Self { dir, _lock: lock })
@@ -875,12 +878,15 @@ impl Custody {
             use cap_std::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NONBLOCK);
         }
+        // FlushFileBuffers below requires write access on Windows.
+        #[cfg(windows)]
+        options.write(true);
         let file = match self.dir.open_with(name, &options) {
             Ok(file) => file.into_std(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        private_metadata(&file.metadata()?, false)?;
+        private_file(&file)?;
         ensure!(
             file.metadata()?.len() <= MAX_REPORT,
             "custody file exceeds limit"
@@ -969,11 +975,15 @@ fn checked_path(path: &Path, may_create: bool) -> Result<PathBuf> {
                 .any(|c| matches!(c, Component::CurDir | Component::ParentDir)),
         "host storage paths must be normalized absolute paths"
     );
-    if path.exists() {
+    // Unix requires the configured path to already be canonical; Windows allows only
+    // verbatim-prefix and case differences. Either way the canonical form is returned.
+    let resolved = if path.exists() {
+        let canonical = path.canonicalize()?;
         ensure!(
-            path.canonicalize()? == path,
+            same_path(path, &canonical),
             "host storage path contains a symlink"
         );
+        canonical
     } else {
         ensure!(may_create, "host storage path does not exist");
         ensure!(
@@ -981,11 +991,13 @@ fn checked_path(path: &Path, may_create: bool) -> Result<PathBuf> {
             "unsafe host storage path"
         );
         let parent = path.parent().context("host storage parent required")?;
+        let canonical = parent.canonicalize()?;
         ensure!(
-            parent.canonicalize()? == parent,
+            same_path(parent, &canonical),
             "host storage parent contains a symlink"
         );
-    }
+        canonical.join(path.file_name().context("host storage name required")?)
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -998,8 +1010,29 @@ fn checked_path(path: &Path, may_create: bool) -> Result<PathBuf> {
             );
         }
     }
-    Ok(path.to_owned())
+    Ok(resolved)
 }
+fn same_path(path: &Path, canonical: &Path) -> bool {
+    #[cfg(windows)]
+    return crate::win_acl::same_path(path, canonical);
+    #[cfg(not(windows))]
+    return path == canonical;
+}
+fn private_path(path: &Path, directory: bool) -> Result<()> {
+    #[cfg(windows)]
+    return crate::win_acl::check_path(path, directory).context(PRIVATE_MESSAGE);
+    #[cfg(not(windows))]
+    private_metadata(&fs::symlink_metadata(path)?, directory)
+}
+fn private_file(file: &fs::File) -> Result<()> {
+    #[cfg(windows)]
+    return crate::win_acl::check_file(file).context(PRIVATE_MESSAGE);
+    #[cfg(not(windows))]
+    private_metadata(&file.metadata()?, false)
+}
+const PRIVATE_MESSAGE: &str =
+    "host storage files/directories must be owner-only, regular and not linked";
+#[cfg(not(windows))]
 fn private_metadata(metadata: &fs::Metadata, directory: bool) -> Result<()> {
     #[cfg(unix)]
     {
@@ -1011,7 +1044,7 @@ fn private_metadata(metadata: &fs::Metadata, directory: bool) -> Result<()> {
                 metadata.is_file() && metadata.nlink() == 1
             }) && metadata.uid() == unsafe { libc::geteuid() }
                 && metadata.mode() & 0o077 == 0,
-            "host storage files/directories must be owner-only, regular and not linked"
+            PRIVATE_MESSAGE
         );
         Ok(())
     }
