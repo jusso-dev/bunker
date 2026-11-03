@@ -117,6 +117,7 @@ struct Inner {
     provider: Provider,
     base: Url,
     root: String,
+    region: Option<String>,
     required_until: DateTime<Utc>,
     identity: BackendIdentity,
     transport: Arc<dyn Transport>,
@@ -163,6 +164,9 @@ pub struct ProtectionEvidence {
     pub identity: BackendIdentity,
     pub required_until: DateTime<Utc>,
     pub objects: BTreeMap<String, ObjectProof>,
+    /// Configured provider region. Informational: not a residency attestation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 impl ProtectedBackend {
@@ -246,7 +250,7 @@ impl ProtectedBackend {
         let allowed = if config.service == "s3" {
             vec!["endpoint", "bucket", "root", "region"]
         } else {
-            vec!["endpoint", "container", "root", "account_name"]
+            vec!["endpoint", "container", "root", "account_name", "region"]
         };
         ensure!(
             config.options.keys().all(|k| allowed.contains(&k.as_str())),
@@ -290,6 +294,13 @@ impl ProtectedBackend {
                 .map(Zeroizing::new)
                 .context("required explicit credential is unavailable")
         };
+        let region = config.region().map(str::to_owned);
+        ensure!(
+            region.as_deref().is_none_or(|region| region
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')),
+            "invalid storage region"
+        );
         let mut base = Url::parse(&option("endpoint")?)
             .map_err(|_| anyhow!("invalid protected HTTPS endpoint"))?;
         ensure!(
@@ -386,6 +397,7 @@ impl ProtectedBackend {
             provider,
             base,
             root,
+            region,
             required_until,
             identity: BackendIdentity {
                 backend,
@@ -438,6 +450,7 @@ impl ProtectedBackend {
             identity: self.identity().clone(),
             required_until: self.0.required_until,
             objects,
+            region: self.0.region.clone(),
         })
     }
     /// Load externally saved evidence for version-pinned recovery. This cannot create a
