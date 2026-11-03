@@ -125,7 +125,7 @@ export default async function humanBrowserRegression(fixture) {
     );
     await click("Alerts");
     const link = [...document.querySelectorAll("a")].find(
-      (a) => a.textContent.trim() === "Open snapshot",
+      (a) => a.textContent.trim() === "Open snapshot in timeline",
     );
     assert(link, "snapshot link");
     link.click();

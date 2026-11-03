@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/security.test.ts tests/client.test.tsx tests/identity-config.test.ts tests/notifications.test.ts tests/notification-shutdown.test.ts",
+    "test": "tsx --test tests/security.test.ts tests/client.test.tsx tests/console-state.test.tsx tests/identity-config.test.ts tests/notifications.test.ts tests/notification-shutdown.test.ts",
     "db:migrate": "tsx scripts/migrate.ts",
     "bootstrap": "tsx scripts/bootstrap.ts",
     "generate:api": "tsx scripts/openapi.ts && openapi-typescript ../shared/openapi.yaml -o src/lib/api.generated.ts",
