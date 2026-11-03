@@ -413,7 +413,7 @@ fn capture_session(
     repo.audit("session_end_captured", serde_json::json!({"workspace_snapshots":snapshots,"setup_snapshots":setup.iter().map(|m|&m.id).collect::<Vec<_>>(),"failed_scopes":failed}))?;
     anyhow::ensure!(failed == 0, "one or more configured workspace snapshots failed; successful setup/workspace snapshots were retained");
     Ok(
-        serde_json::json!({"workspace_snapshots":snapshots,"setup_snapshots":setup.iter().map(|m|&m.id).collect::<Vec<_>>() }),
+        serde_json::json!({"session":event.session_id,"workspace_snapshots":snapshots,"setup_snapshots":setup.iter().map(|m|&m.id).collect::<Vec<_>>() }),
     )
 }
 /// Resolves an explicit snapshot, or a session's derived rollback restore point.
@@ -508,13 +508,19 @@ fn run() -> Result<()> {
             bunker_discovery::discover(&context, &bunker_discovery::SafetyPolicy::default())?;
         let mut output = serde_json::to_value(&results)?;
         // Additive field: existing per-agent fields are unchanged.
-        for (result, value) in results.iter().zip(output.as_array_mut().into_iter().flatten()) {
+        for (result, value) in results
+            .iter()
+            .zip(output.as_array_mut().into_iter().flatten())
+        {
             value["by_category"] = serde_json::to_value(
                 result
                     .by_category()
                     .into_iter()
                     .map(|(category, items)| {
-                        (category, items.into_iter().map(|i| i.path()).collect::<Vec<_>>())
+                        (
+                            category,
+                            items.into_iter().map(|i| i.path()).collect::<Vec<_>>(),
+                        )
                     })
                     .collect::<std::collections::BTreeMap<_, _>>(),
             )?;
@@ -763,20 +769,23 @@ fn run() -> Result<()> {
         let policy = Policy::load(cli.policy.as_deref())?;
         if host_config.is_none() && !workspace.is_empty() {
             // Pre-session baseline for `restore --session`; release the lock before the child runs.
-            let captured = Repository::open_with_key_source(&cli.repo, &key_source).and_then(|repo| {
-                for path in workspace {
-                    repo.snapshot(
-                        path,
-                        &policy,
-                        Some(event.agent.as_str().into()),
-                        Some(event.session_id.clone()),
-                        bunker::repository::SESSION_START,
-                    )?;
-                }
-                Ok(())
-            });
+            let captured =
+                Repository::open_with_key_source(&cli.repo, &key_source).and_then(|repo| {
+                    for path in workspace {
+                        repo.snapshot(
+                            path,
+                            &policy,
+                            Some(event.agent.as_str().into()),
+                            Some(event.session_id.clone()),
+                            bunker::repository::SESSION_START,
+                        )?;
+                    }
+                    Ok(())
+                });
             if let Err(error) = captured {
-                eprintln!("Pre-session capture failed; session rollback will be unavailable: {error:#}");
+                eprintln!(
+                    "Pre-session capture failed; session rollback will be unavailable: {error:#}"
+                );
             }
         }
         let cancelled = Arc::new(AtomicBool::new(false));

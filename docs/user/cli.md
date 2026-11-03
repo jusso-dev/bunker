@@ -1,6 +1,6 @@
 # CLI reference
 
-Run `bunker --help` and `bunker COMMAND --help` for the installed revision. A test (`cli_reference_documents_every_subcommand_and_long_flag`) walks the built command tree and fails when a subcommand or long flag is missing from this page.
+Run `bunker --help` and `bunker COMMAND --help` for the installed revision. A test (`cli_reference_documents_every_subcommand_and_long_flag`) walks the built command tree and fails when a subcommand has no row on this page or a long flag is missing from that command's row.
 
 ## Global flags
 
@@ -33,7 +33,7 @@ Most operations need `BUNKER_PASSPHRASE` or `--key-config`; `discover`, `status`
 | --- | --- |
 | `diff SNAPSHOT` | Required `--workspace PATH`; optional `--file RELATIVE_PATH`. Prints planned creates/replacements and a confirmation bound to the plan. |
 | `diff --session ID` | Session rollback preview (instead of `SNAPSHOT`). Prints the rollback summary (`baseline_snapshot`, `session_end_snapshot`, `rollback_snapshot`, `restored_paths`, `created_during_session`) and then the plan. |
-| `restore SNAPSHOT` | Same destination and file flags as `diff`; without `--confirm TOKEN`, only previews. With the reviewed token, applies the plan. Replacing settings containing unbound secret placeholders also requires explicit `--allow-rebind-overwrite`. |
+| `restore SNAPSHOT` | Required `--workspace PATH`; optional `--file RELATIVE_PATH` (as for `diff`); without `--confirm TOKEN`, only previews. With the reviewed token, applies the plan. Replacing settings containing unbound secret placeholders also requires explicit `--allow-rebind-overwrite`. |
 | `restore --session ID` | Rolls back files changed or removed during that agent session to their pre-session content, with the same preview, `--confirm TOKEN` and stale-token refusal as any restore. |
 | `restore-test SNAPSHOT` | Restores into a disposable directory and records file-integrity evidence. Add `--workspace SOURCE --probe-config PATH` to run explicitly configured isolated boot/MCP probes; runtime/configuration paths must be outside the source workspace and repository. |
 | `restore-journal ID` | Inspects the encrypted transaction journal for an interrupted or completed restore. Preserve interrupted transaction data before attempting recovery. |
@@ -56,7 +56,7 @@ Session rollback needs a pre-session baseline bound to the same session ID: a `s
 | Command | Arguments and behavior |
 | --- | --- |
 | `session-end` | Required `--agent NAME` and `--home PATH` (unless `--host-config PATH`); `--workspace PATH` (repeatable); optional `--session-id ID`. Captures configured roots after a session. Without `--session-id`, Claude Code's native `SessionEnd` hook payload is read from standard input; its untrusted `cwd` and transcript path are ignored. |
-| `session-run` | Same `--agent`, `--home`, `--host-config`, `--workspace` and `--session-id` flags, then `-- /absolute/program args`. Trusted wrapper fallback: in standalone mode it takes a `session-start` snapshot of each workspace, runs the program, captures after exit or cancellation, and exits with the program's status. Host mode requires `--session-id`. |
+| `session-run` | Same `--agent`, `--home`, `--host-config`, `--workspace` and `--session-id` flags, then `-- /absolute/program args`. Trusted wrapper fallback: in standalone mode it takes a `session-start` snapshot of each workspace, runs the program, captures after exit or cancellation, and exits with the program's status. The report names the `session` ID (generated when `--session-id` is omitted) for `restore --session`. Host mode requires `--session-id`. |
 | `hook-claude` | Required `--home PATH`; `--workspace PATH` (repeatable); optional `--host-config PATH`. Previews a reversible Claude `SessionEnd` hook; apply with its `--confirm TOKEN`, remove with `--disable`. |
 
 ## Maintenance and keys

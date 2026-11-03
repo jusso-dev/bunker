@@ -469,8 +469,14 @@ impl DiscoveryAdapter for BuiltinAdapter {
             let jetbrains = context.jetbrains_copilot_base();
             for (path, kind) in [
                 ("github-copilot/intellij/mcp.json", McpConfig),
-                ("github-copilot/intellij/global-copilot-instructions.md", Rule),
-                ("github-copilot/intellij/global-git-commit-instructions.md", Rule),
+                (
+                    "github-copilot/intellij/global-copilot-instructions.md",
+                    Rule,
+                ),
+                (
+                    "github-copilot/intellij/global-git-commit-instructions.md",
+                    Rule,
+                ),
             ] {
                 add(&mut candidates, &jetbrains, path, kind, false);
             }

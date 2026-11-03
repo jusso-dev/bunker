@@ -156,6 +156,7 @@ fn claude_session_end_hook_payload_creates_a_listed_snapshot() {
         )
         .unwrap();
     let report = success(child.wait_with_output().unwrap());
+    assert_eq!(report[0]["session"], "claude-fixture-1");
     let created = report[0]["workspace_snapshots"].as_array().unwrap();
     assert_eq!(created.len(), 1);
     let listed = list(&f.repo);
@@ -221,7 +222,11 @@ fn session_run_captures_before_and_after_and_preserves_exit_status() {
             String::from_utf8_lossy(&output.stderr)
         );
         let report = documents(&output);
-        assert_eq!(report[0]["workspace_snapshots"].as_array().unwrap().len(), 1);
+        assert_eq!(report[0]["session"], session);
+        assert_eq!(
+            report[0]["workspace_snapshots"].as_array().unwrap().len(),
+            1
+        );
         let triggers: BTreeSet<_> = list(&f.repo)
             .iter()
             .filter(|m| m["session"] == session && m["agent"] == "codex")
@@ -271,7 +276,10 @@ fn session_rollback_cli_reviews_confirms_and_restores_pre_session_state() {
     let diff = success(review("diff").output().unwrap());
     let (rollback, plan) = (&diff[0], &diff[1]);
     assert_eq!(rollback["session"], session);
-    assert_eq!(rollback["restored_paths"], json!(["edited.txt", "removed.txt"]));
+    assert_eq!(
+        rollback["restored_paths"],
+        json!(["edited.txt", "removed.txt"])
+    );
     assert_eq!(rollback["created_during_session"], json!(["created.txt"]));
     assert_eq!(plan["snapshot"], rollback["rollback_snapshot"]);
     let actions: Vec<_> = plan["changes"]
@@ -422,7 +430,10 @@ fn mcp_tools_list_is_exactly_the_non_destructive_tool_set() {
     let repo = Repository::open(&f.repo, PASS).unwrap();
     assert_eq!(repo.list().unwrap().len(), 1);
     repo.verify(&snapshot.id).unwrap();
-    assert_eq!(fs::read_to_string(f.work.join("a.txt")).unwrap(), "fixture\n");
+    assert_eq!(
+        fs::read_to_string(f.work.join("a.txt")).unwrap(),
+        "fixture\n"
+    );
 }
 
 /// Long flags listed under a help page's `Options:` heading.
@@ -463,34 +474,68 @@ fn help(path: &[String]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// Reference-table rows documenting `name` (`| \`name\`` or `| \`name ARG...\``).
+fn doc_rows<'a>(docs: &'a str, name: &str) -> Vec<&'a str> {
+    docs.lines()
+        .filter(|line| {
+            line.strip_prefix(&format!("| `{name}"))
+                .is_some_and(|rest| rest.starts_with('`') || rest.starts_with(' '))
+        })
+        .collect()
+}
+
 #[test]
 fn cli_reference_documents_every_subcommand_and_long_flag() {
-    let docs = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/user/cli.md"),
-    )
-    .unwrap();
+    let docs =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/user/cli.md"))
+            .unwrap();
+    // Global flags are documented once, in their own table.
+    let global = help_flags(&help(&[]));
+    for flag in &global {
+        assert!(
+            doc_rows(&docs, &format!("--{flag}")).len() == 1,
+            "global --{flag} undocumented"
+        );
+    }
     let mut missing = vec![];
-    let mut pending: Vec<Vec<String>> = vec![vec![]];
-    let mut visited = 0;
+    let mut visited = BTreeSet::new();
+    let mut pending: Vec<Vec<String>> = help_commands(&help(&[]))
+        .into_iter()
+        .map(|c| vec![c])
+        .collect();
     while let Some(path) = pending.pop() {
-        visited += 1;
+        let name = path.join(" ");
         let page = help(&path);
+        // A flag counts only when the command's own row (or, for nested
+        // commands, the parent's row) names it.
+        let mut rows = doc_rows(&docs, &name);
+        if rows.is_empty() {
+            missing.push(name.clone());
+        }
+        rows.extend(doc_rows(&docs, &path[..path.len() - 1].join(" ")));
         for flag in help_flags(&page) {
-            if !docs.contains(&format!("--{flag}")) {
-                missing.push(format!("{} --{flag}", path.join(" ")));
+            if !global.contains(&flag) && !rows.iter().any(|row| row.contains(&format!("--{flag}")))
+            {
+                missing.push(format!("{name} --{flag}"));
             }
         }
         for command in help_commands(&page) {
             let mut child = path.clone();
             child.push(command);
-            let name = child.join(" ");
-            if !docs.contains(&format!("`{name} ")) && !docs.contains(&format!("`{name}`")) {
-                missing.push(name);
-            }
             pending.push(child);
         }
+        visited.insert(name);
     }
-    assert!(visited > 40, "help walk found only {visited} pages");
+    // The walk must reach nested commands, not stop at an unparsed top page.
+    for expected in [
+        "restore",
+        "session-run",
+        "host",
+        "host request-restore",
+        "mcp",
+    ] {
+        assert!(visited.contains(expected), "help walk missed {expected}");
+    }
     assert!(
         missing.is_empty(),
         "docs/user/cli.md is missing: {missing:#?}"

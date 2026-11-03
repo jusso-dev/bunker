@@ -104,7 +104,9 @@ fn every_agent_reports_every_supported_category_on_each_platform() {
                 .unwrap()
                 .items
                 .iter()
-                .any(|i| i.root == root && i.relative_path == Path::new(path) && i.category == category)
+                .any(|i| {
+                    i.root == root && i.relative_path == Path::new(path) && i.category == category
+                })
         };
         let workspace = &context.workspace_roots[0];
         assert!(has(
@@ -159,7 +161,11 @@ fn unreadable_managed_settings_are_reported_without_failing_discovery() {
     let (_temp, context) = fixture(Platform::Linux);
     let editor = context.config_dir.clone().unwrap();
     let managed = editor.join("Code/User/settings.json");
-    write(&editor, "Code/User/settings.json", "{\"github.copilot.enable\":{\"*\":false}}");
+    write(
+        &editor,
+        "Code/User/settings.json",
+        "{\"github.copilot.enable\":{\"*\":false}}",
+    );
     let locked = context.home.join(".copilot/agents");
     let restore = |mode| {
         fs::set_permissions(&managed, fs::Permissions::from_mode(mode)).unwrap();
@@ -189,7 +195,10 @@ fn unreadable_managed_settings_are_reported_without_failing_discovery() {
                 && e.reason == ExclusionReason::Unreadable),
             "{path} not reported unreadable"
         );
-        assert!(!copilot.items.iter().any(|i| i.relative_path.starts_with(path)));
+        assert!(!copilot
+            .items
+            .iter()
+            .any(|i| i.relative_path.starts_with(path)));
     }
     assert!(copilot
         .items

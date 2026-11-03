@@ -670,7 +670,13 @@ fn agent_fixture(agent: &str) -> Vec<(String, String)> {
         "claude-code" => &[".claude/", ".claude.json", "CLAUDE.md", ".mcp.json"],
         "cursor" => &[".cursor/", ".cursorrules", "Cursor/"],
         "codex" => &[".codex/", "AGENTS.md"],
-        "copilot" => &[".copilot/", ".github/", ".vscode/", "Code/", "github-copilot/"],
+        "copilot" => &[
+            ".copilot/",
+            ".github/",
+            ".vscode/",
+            "Code/",
+            "github-copilot/",
+        ],
         "kiro" => &[".kiro/", "Kiro/"],
         _ => unreachable!(),
     };
@@ -735,7 +741,11 @@ fn each_agent_fixture_backs_up_restores_and_passes_restore_test() {
                 "manual",
             )
             .unwrap();
-        assert_eq!(snapshot.files.len(), files.len(), "{agent} capture incomplete");
+        assert_eq!(
+            snapshot.files.len(),
+            files.len(),
+            "{agent} capture incomplete"
+        );
         repo.verify(&snapshot.id).unwrap();
         // Backup -> restore into a fresh destination.
         let destination = root.join("restored");
@@ -750,15 +760,51 @@ fn each_agent_fixture_backs_up_restores_and_passes_restore_test() {
             if !entry.sanitized {
                 assert_eq!(&restored, text, "{agent} {path} not byte-exact");
             }
-            assert!(!restored.contains("fake-"), "{agent} {path} leaked a credential");
+            assert!(
+                !restored.contains("fake-"),
+                "{agent} {path} leaked a credential"
+            );
         }
         // -> restore test with an agent boot and MCP probe for this agent.
         let mut cfg = config();
         cfg.agents[0].agent = agent.into();
-        let mut executor = Expect { files, calls: 0 };
+        // Captured credential references fail closed: no executor ever starts.
+        let mut executor = Expect {
+            files: vec![],
+            calls: 0,
+        };
         let evidence = run_restore_probes(&repo, &snapshot.id, &cfg, &mut executor).unwrap();
+        assert_eq!(executor.calls, 0);
+        assert_eq!(
+            evidence.agents[0].outcome,
+            ProbeOutcome::NotRunWithReason(ProbeSkip::CredentialsUnavailable)
+        );
+        // The credential-free configuration of the same agent boots and initializes MCP.
+        let (with_references, files): (Vec<_>, Vec<_>) =
+            files.into_iter().partition(|(path, _)| {
+                snapshot
+                    .files
+                    .iter()
+                    .any(|f| f.path == *path && !f.secret_references.is_empty())
+            });
+        assert!(!with_references.is_empty() && files.len() >= 2, "{agent}");
+        for (path, _) in &with_references {
+            fs::remove_file(work.join(path)).unwrap();
+        }
+        let clean = repo
+            .snapshot(
+                &work,
+                &bunker::policy::Policy::default(),
+                Some(agent.into()),
+                None,
+                "manual",
+            )
+            .unwrap();
+        assert_eq!(clean.files.len(), files.len(), "{agent} clean capture");
+        let mut executor = Expect { files, calls: 0 };
+        let evidence = run_restore_probes(&repo, &clean.id, &cfg, &mut executor).unwrap();
         assert_eq!(executor.calls, 2);
-        assert_eq!(evidence.snapshot, snapshot.id);
+        assert_eq!(evidence.snapshot, clean.id);
         assert_eq!(evidence.agents[0].agent, agent);
         assert_eq!(evidence.agents[0].outcome, ProbeOutcome::Passed);
         assert_eq!(evidence.mcps[0].outcome, ProbeOutcome::Passed);
