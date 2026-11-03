@@ -67,6 +67,10 @@ jobs:
           node-version: '22'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Generated OpenAPI contract and TypeScript client have not drifted
+        run: |
+          pnpm --filter @bunker/control-plane generate:api
+          git diff --exit-code
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
