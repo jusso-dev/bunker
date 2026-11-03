@@ -103,7 +103,12 @@ impl ConsumerState {
                         "unbound consumer state must be empty"
                     );
                 }
-                crate::repository::atomic_write(&state.dir, "binding", binding.as_bytes(), false)?;
+                crate::private_state::atomic_write(
+                    &state.dir,
+                    "binding",
+                    binding.as_bytes(),
+                    false,
+                )?;
             }
         }
         Ok(state)
@@ -130,7 +135,7 @@ impl ConsumerState {
             crate::repository::valid_id(digest)?;
             ensure!(blake3::hash(token.as_bytes()).to_hex().as_str() != digest, "uncertain refresh requires a different privately recovered or reauthorized credential");
         }
-        crate::repository::atomic_write(&self.dir, "credentials.json", token.as_bytes(), true)?;
+        crate::private_state::atomic_write(&self.dir, "credentials.json", token.as_bytes(), true)?;
         self.finish_refresh(&self.reference)
             .map_err(|_| anyhow::anyhow!("failed to commit OAuth rebinding"))
     }
@@ -154,7 +159,7 @@ impl ConsumerState {
         // Persist the directory entry itself before a report can authorize local
         // checkpoint advancement. Syncing only the new child is insufficient.
         crate::repository::sync_dir(&self.dir, std::path::Path::new("."))?;
-        crate::repository::atomic_write(
+        crate::private_state::atomic_write(
             &reports,
             &format!("{checkpoint}.json"),
             &report.to_vec()?,
@@ -251,7 +256,12 @@ impl RefreshTokenSink for ConsumerState {
                 "invalid refresh intent"
             );
             let digest = blake3::hash(token.as_bytes()).to_hex().to_string();
-            crate::repository::atomic_write(&self.dir, "refresh-pending", digest.as_bytes(), false)
+            crate::private_state::atomic_write(
+                &self.dir,
+                "refresh-pending",
+                digest.as_bytes(),
+                false,
+            )
         })()
         .map_err(|_| PersistenceError)
     }
@@ -301,7 +311,12 @@ impl RefreshTokenSink for ConsumerState {
                     && !token.chars().any(char::is_control),
                 "invalid refresh rotation"
             );
-            crate::repository::atomic_write(&self.dir, "credentials.json", token.as_bytes(), true)
+            crate::private_state::atomic_write(
+                &self.dir,
+                "credentials.json",
+                token.as_bytes(),
+                true,
+            )
         })()
         .map_err(|_| PersistenceError)
     }
@@ -314,7 +329,7 @@ impl EvidenceSink for ConsumerState {
                 "consumer evidence location mismatch"
             );
             let bytes = evidence.to_vec()?;
-            crate::repository::atomic_write(&self.dir, "evidence.json", &bytes, true)
+            crate::private_state::atomic_write(&self.dir, "evidence.json", &bytes, true)
         })()
         .map_err(|_| PersistenceError)
     }

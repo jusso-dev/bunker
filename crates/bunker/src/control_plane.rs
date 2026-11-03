@@ -175,6 +175,8 @@ impl CredentialStore {
             "credential state too large"
         );
         let mut temporary = tempfile::NamedTempFile::new_in(&self.dir)?;
+        #[cfg(windows)]
+        crate::win_acl::check_file(temporary.as_file())?;
         temporary.write_all(&bytes)?;
         temporary.as_file().sync_all()?;
         temporary
@@ -596,11 +598,12 @@ pub(crate) fn private_directory(path: &Path) -> Result<PathBuf> {
     #[cfg(windows)]
     {
         let absolute = std::path::absolute(path)?;
+        crate::win_acl::check_ancestors(&absolute)?;
         // Created with a protected owner-only DACL; an existing name is validated, not fixed.
         crate::win_acl::create_private_directory(&absolute)?;
         crate::win_acl::check_path(&absolute, true)
             .context("host state directory must be owner-only and not a symlink")?;
-        // Reject junctioned or symlinked parents, as on Unix. Directory sync is a no-op here.
+        // Ancestors were inspected directly; this also rejects 8.3 path aliases.
         let canonical = path.canonicalize()?;
         ensure!(
             crate::win_acl::same_path(&absolute, &canonical),

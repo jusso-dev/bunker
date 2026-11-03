@@ -248,6 +248,8 @@ impl ConsumedRequests {
         let mut file = options
             .open(path)
             .context("restore already consumed or durable claim state unavailable")?;
+        #[cfg(windows)]
+        crate::win_acl::check_file(&file)?;
         file.write_all(b"consumed-before-claim-v1\n")?;
         file.sync_all()?;
         crate::repository::sync_ambient_dir(&self.directory)?;
