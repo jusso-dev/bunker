@@ -80,6 +80,8 @@ impl ConsumerState {
                 "unsafe consumer state lock"
             );
         }
+        #[cfg(windows)]
+        crate::win_acl::check_file(&lock).context("unsafe consumer state lock")?;
         lock.try_lock_exclusive()
             .context("consumer state is busy")?;
         let state = Self {
@@ -101,7 +103,12 @@ impl ConsumerState {
                         "unbound consumer state must be empty"
                     );
                 }
-                crate::repository::atomic_write(&state.dir, "binding", binding.as_bytes(), false)?;
+                crate::private_state::atomic_write(
+                    &state.dir,
+                    "binding",
+                    binding.as_bytes(),
+                    false,
+                )?;
             }
         }
         Ok(state)
@@ -128,7 +135,7 @@ impl ConsumerState {
             crate::repository::valid_id(digest)?;
             ensure!(blake3::hash(token.as_bytes()).to_hex().as_str() != digest, "uncertain refresh requires a different privately recovered or reauthorized credential");
         }
-        crate::repository::atomic_write(&self.dir, "credentials.json", token.as_bytes(), true)?;
+        crate::private_state::atomic_write(&self.dir, "credentials.json", token.as_bytes(), true)?;
         self.finish_refresh(&self.reference)
             .map_err(|_| anyhow::anyhow!("failed to commit OAuth rebinding"))
     }
@@ -151,8 +158,8 @@ impl ConsumerState {
         let reports = self.dir.open_dir_nofollow("reports")?;
         // Persist the directory entry itself before a report can authorize local
         // checkpoint advancement. Syncing only the new child is insufficient.
-        self.dir.try_clone()?.into_std_file().sync_all()?;
-        crate::repository::atomic_write(
+        crate::repository::sync_dir(&self.dir, std::path::Path::new("."))?;
+        crate::private_state::atomic_write(
             &reports,
             &format!("{checkpoint}.json"),
             &report.to_vec()?,
@@ -217,6 +224,8 @@ impl ConsumerState {
                 "unsafe consumer state permissions"
             );
         }
+        #[cfg(windows)]
+        crate::win_acl::check_file(&file).context("unsafe consumer state permissions")?;
         let mut bytes = Zeroizing::new(Vec::new());
         file.take(limit + 1).read_to_end(&mut bytes)?;
         ensure!(bytes.len() as u64 <= limit, "consumer state exceeds limit");
@@ -247,7 +256,12 @@ impl RefreshTokenSink for ConsumerState {
                 "invalid refresh intent"
             );
             let digest = blake3::hash(token.as_bytes()).to_hex().to_string();
-            crate::repository::atomic_write(&self.dir, "refresh-pending", digest.as_bytes(), false)
+            crate::private_state::atomic_write(
+                &self.dir,
+                "refresh-pending",
+                digest.as_bytes(),
+                false,
+            )
         })()
         .map_err(|_| PersistenceError)
     }
@@ -257,7 +271,7 @@ impl RefreshTokenSink for ConsumerState {
             if self.read("refresh-pending", 64)?.is_some() {
                 self.dir.remove_file("refresh-pending")?;
             }
-            self.dir.try_clone()?.into_std_file().sync_all()?;
+            crate::repository::sync_dir(&self.dir, std::path::Path::new("."))?;
             Ok(())
         })()
         .map_err(|_| PersistenceError)
@@ -297,7 +311,12 @@ impl RefreshTokenSink for ConsumerState {
                     && !token.chars().any(char::is_control),
                 "invalid refresh rotation"
             );
-            crate::repository::atomic_write(&self.dir, "credentials.json", token.as_bytes(), true)
+            crate::private_state::atomic_write(
+                &self.dir,
+                "credentials.json",
+                token.as_bytes(),
+                true,
+            )
         })()
         .map_err(|_| PersistenceError)
     }
@@ -310,7 +329,7 @@ impl EvidenceSink for ConsumerState {
                 "consumer evidence location mismatch"
             );
             let bytes = evidence.to_vec()?;
-            crate::repository::atomic_write(&self.dir, "evidence.json", &bytes, true)
+            crate::private_state::atomic_write(&self.dir, "evidence.json", &bytes, true)
         })()
         .map_err(|_| PersistenceError)
     }

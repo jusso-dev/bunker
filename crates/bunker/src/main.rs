@@ -22,6 +22,9 @@ struct Cli {
     /// Explicit AWS KMS, Azure Key Vault or GCP KMS provider configuration.
     #[arg(long, global = true)]
     key_config: Option<PathBuf>,
+    /// Diagnostic level for JSON stderr logs: error, warn, info or debug. Overrides BUNKER_LOG.
+    #[arg(long, global = true)]
+    log_level: Option<bunker::logging::Level>,
     #[command(subcommand)]
     command: Command,
 }
@@ -111,14 +114,22 @@ enum Command {
     },
     List,
     Diff {
-        snapshot: String,
+        #[arg(required_unless_present = "session")]
+        snapshot: Option<String>,
+        /// Roll back files changed during this agent session to their pre-session state.
+        #[arg(long, conflicts_with = "snapshot")]
+        session: Option<String>,
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
         file: Option<String>,
     },
     Restore {
-        snapshot: String,
+        #[arg(required_unless_present = "session")]
+        snapshot: Option<String>,
+        /// Roll back files changed during this agent session to their pre-session state.
+        #[arg(long, conflicts_with = "snapshot")]
+        session: Option<String>,
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
@@ -128,6 +139,9 @@ enum Command {
         /// Permit overwriting settings with unbound secret placeholders (local operator action).
         #[arg(long)]
         allow_rebind_overwrite: bool,
+        /// Restore without the pre-restore safety snapshot (no undo point); reported in the output.
+        #[arg(long)]
+        no_safety_snapshot: bool,
     },
     Verify {
         snapshot: String,
@@ -271,7 +285,11 @@ enum HostAction {
         token_env: Option<String>,
     },
     RequestRestore {
-        snapshot: String,
+        #[arg(required_unless_present = "session")]
+        snapshot: Option<String>,
+        /// Request a session rollback to the pre-session state.
+        #[arg(long, conflicts_with = "snapshot")]
+        session: Option<String>,
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
@@ -358,9 +376,7 @@ fn write_review_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     temporary
         .persist_noclobber(path)
         .map_err(|_| anyhow::anyhow!("review document destination exists or cannot be written"))?;
-    cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?
-        .into_std_file()
-        .sync_all()?;
+    bunker::repository::sync_ambient_dir(parent)?;
     Ok(())
 }
 fn parse_agent(value: &str) -> Result<bunker_discovery::AgentId> {
@@ -393,7 +409,7 @@ fn capture_session(
             policy,
             Some(event.agent.as_str().into()),
             Some(event.session_id.clone()),
-            "session-end",
+            bunker::repository::SESSION_END,
         ) {
             Ok(snapshot) => snapshots.push(snapshot.id),
             Err(_) => failed += 1,
@@ -403,8 +419,25 @@ fn capture_session(
     repo.audit("session_end_captured", serde_json::json!({"workspace_snapshots":snapshots,"setup_snapshots":setup.iter().map(|m|&m.id).collect::<Vec<_>>(),"failed_scopes":failed}))?;
     anyhow::ensure!(failed == 0, "one or more configured workspace snapshots failed; successful setup/workspace snapshots were retained");
     Ok(
-        serde_json::json!({"workspace_snapshots":snapshots,"setup_snapshots":setup.iter().map(|m|&m.id).collect::<Vec<_>>() }),
+        serde_json::json!({"session":event.session_id,"workspace_snapshots":snapshots,"setup_snapshots":setup.iter().map(|m|&m.id).collect::<Vec<_>>() }),
     )
+}
+/// Resolves an explicit snapshot, or a session's derived rollback restore point.
+fn restore_target(
+    repo: &Repository,
+    snapshot: Option<String>,
+    session: Option<String>,
+    workspace: &std::path::Path,
+) -> Result<String> {
+    match (snapshot, session) {
+        (Some(snapshot), None) => Ok(snapshot),
+        (None, Some(session)) => {
+            let rollback = repo.session_rollback(&session, workspace)?;
+            print(&rollback)?;
+            Ok(rollback.rollback_snapshot)
+        }
+        _ => anyhow::bail!("pass exactly one of SNAPSHOT or --session"),
+    }
 }
 #[derive(Debug)]
 struct SessionExit(i32);
@@ -414,8 +447,29 @@ impl std::fmt::Display for SessionExit {
     }
 }
 impl std::error::Error for SessionExit {}
+/// An invalid `--log-level` is a clap usage error. An invalid ambient `BUNKER_LOG` must not
+/// stop hooks, session capture or MCP: warn and use the default.
+fn log_level(flag: Option<bunker::logging::Level>) -> bunker::logging::Level {
+    if let Some(level) = flag {
+        return level;
+    }
+    let invalid = match std::env::var("BUNKER_LOG") {
+        Err(std::env::VarError::NotPresent) => return bunker::logging::Level::Info,
+        Ok(value) => match value.parse() {
+            Ok(level) => return level,
+            Err(error) => error,
+        },
+        Err(_) => "invalid log level; expected error, warn, info or debug".to_owned(),
+    };
+    bunker::logging::warn(
+        &format!("BUNKER_LOG: {invalid}; using info"),
+        serde_json::json!({"event":"invalid_log_level"}),
+    );
+    bunker::logging::Level::Info
+}
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    bunker::logging::set_level(log_level(cli.log_level));
     if let Command::ConsumerRebind {
         storage,
         consumer_state,
@@ -478,10 +532,28 @@ fn run() -> Result<()> {
             home,
             workspace.clone(),
         );
-        return print(bunker_discovery::discover(
-            &context,
-            &bunker_discovery::SafetyPolicy::default(),
-        )?);
+        let results =
+            bunker_discovery::discover(&context, &bunker_discovery::SafetyPolicy::default())?;
+        let mut output = serde_json::to_value(&results)?;
+        // Additive field: existing per-agent fields are unchanged.
+        for (result, value) in results
+            .iter()
+            .zip(output.as_array_mut().into_iter().flatten())
+        {
+            value["by_category"] = serde_json::to_value(
+                result
+                    .by_category()
+                    .into_iter()
+                    .map(|(category, items)| {
+                        (
+                            category,
+                            items.into_iter().map(|i| i.path()).collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )?;
+        }
+        return print(output);
     }
     let key_source = if let Command::Recover {
         escrow: Some(path), ..
@@ -625,6 +697,16 @@ fn run() -> Result<()> {
             serde_json::json!({"verified_snapshots":count,"inventory_completeness":if *legacy_unindexed {"unproven_legacy_listing"} else {"authenticated_inventory_pinned_by_saved_locator"},"selected_snapshot":snapshot,"escrow_unlock_required":matches!(key_source,KeySource::Escrow{..})}),
         );
     }
+    if matches!(
+        cli.command,
+        Command::Daemon { once: false, .. }
+            | Command::Host {
+                action: HostAction::Run { once: false, .. },
+                ..
+            }
+    ) {
+        ctrlc::set_handler(scheduler::request_shutdown)?;
+    }
     if let Command::Host {
         config,
         action:
@@ -723,6 +805,27 @@ fn run() -> Result<()> {
             anyhow::ensure!(session_id.is_some(), "host session-run requires --session-id so pending capture/delivery can be retried with the same event");
         }
         let policy = Policy::load(cli.policy.as_deref())?;
+        if host_config.is_none() && !workspace.is_empty() {
+            // Pre-session baseline for `restore --session`; release the lock before the child runs.
+            let captured =
+                Repository::open_with_key_source(&cli.repo, &key_source).and_then(|repo| {
+                    for path in workspace {
+                        repo.snapshot(
+                            path,
+                            &policy,
+                            Some(event.agent.as_str().into()),
+                            Some(event.session_id.clone()),
+                            bunker::repository::SESSION_START,
+                        )?;
+                    }
+                    Ok(())
+                });
+            if let Err(error) = captured {
+                eprintln!(
+                    "Pre-session capture failed; session rollback will be unavailable: {error:#}"
+                );
+            }
+        }
         let cancelled = Arc::new(AtomicBool::new(false));
         let signal_flag = Arc::clone(&cancelled);
         ctrlc::set_handler(move || signal_flag.store(true, Ordering::SeqCst))?;
@@ -825,10 +928,12 @@ fn run() -> Result<()> {
             match action {
                 HostAction::RequestRestore {
                     snapshot,
+                    session,
                     workspace,
                     file,
                 } => {
                     let workspace = config.validate_workspace(&workspace)?;
+                    let snapshot = restore_target(&repo, snapshot, session, &workspace)?;
                     let request = host.request_restore(
                         &repo,
                         &consumed,
@@ -841,8 +946,8 @@ fn run() -> Result<()> {
                 }
                 HostAction::ReviewRestore { id } => print(host.local_restore_preview(&repo, &id)?),
                 HostAction::ExecuteRestore { id } => {
-                    host.execute_restore_once(&repo, &consumed, &id)?;
-                    print(serde_json::json!({"restored_once":true}))
+                    let safety = config.execute_restore(&mut host, &consumed, &repo, &id)?;
+                    print(serde_json::json!({"restored_once":true,"pre_restore_snapshot":safety}))
                 }
                 HostAction::Enroll { .. } | HostAction::Run { .. } => unreachable!(),
             }
@@ -981,20 +1086,43 @@ fn run() -> Result<()> {
         Command::List => print(repo.list()?),
         Command::Diff {
             snapshot,
+            session,
             workspace,
             file,
-        } => print(repo.plan(&snapshot, &workspace, file.as_deref())?),
+        } => {
+            let snapshot = restore_target(&repo, snapshot, session, &workspace)?;
+            print(repo.plan(&snapshot, &workspace, file.as_deref())?)
+        }
         Command::Restore {
             snapshot,
+            session,
             workspace,
             file,
             confirm,
             allow_rebind_overwrite,
+            no_safety_snapshot,
         } => {
+            let snapshot = restore_target(&repo, snapshot, session, &workspace)?;
             let plan = repo.plan(&snapshot, &workspace, file.as_deref())?;
             print(&plan)?;
             match confirm {
                 Some(token) => {
+                    // Undo point for the restore itself; only after the reviewed plan matches.
+                    anyhow::ensure!(
+                        token == plan.confirmation,
+                        "restore confirmation missing or stale; review fresh diff"
+                    );
+                    let safety = if no_safety_snapshot {
+                        repo.audit(
+                            "pre_restore_snapshot_skipped",
+                            serde_json::json!({"restoring":plan.snapshot}),
+                        )?;
+                        None
+                    } else {
+                        repo.pre_restore_snapshot(&plan, &Policy::load(cli.policy.as_deref())?)
+                            .context("pre-restore safety snapshot failed; restore not started (fix the cause, or pass --no-safety-snapshot to restore without an undo point)")?
+                            .map(|manifest| manifest.id)
+                    };
                     repo.restore_with_options(
                         &snapshot,
                         &workspace,
@@ -1002,7 +1130,9 @@ fn run() -> Result<()> {
                         &token,
                         allow_rebind_overwrite,
                     )?;
-                    print(serde_json::json!({"restored":true}))
+                    print(
+                        serde_json::json!({"restored":true,"pre_restore_snapshot":safety,"safety_snapshot_skipped":no_safety_snapshot}),
+                    )
                 }
                 None => {
                     eprintln!("Review this diff, then repeat with --confirm <confirmation>.");
@@ -1108,6 +1238,9 @@ fn run() -> Result<()> {
             consumer_state,
         } => {
             let config = bunker::storage::StorageConfig::load(&storage)?;
+            if let Some(warning) = config.immutability_warning() {
+                eprintln!("{warning}");
+            }
             if matches!(config.service.as_str(), "gdrive" | "onedrive") {
                 use std::sync::Arc;
                 anyhow::ensure!(
@@ -1189,19 +1322,32 @@ fn run() -> Result<()> {
                     "protected report exceeds limit"
                 );
                 write_review_file(&output, &bytes)?;
+                let target = config.target_summary();
+                repo.audit(
+                    "replicated",
+                    serde_json::json!({"namespace":report.namespace,"storage":target,"immutable":true}),
+                )?;
                 return print(
-                    serde_json::json!({"namespace":report.namespace,"sequence":report.sequence,"objects_per_backend":report.objects_per_backend,"protected_backends":report.backends.len(),"report_saved":true,"retain_until":until}),
+                    serde_json::json!({"namespace":report.namespace,"sequence":report.sequence,"objects_per_backend":report.objects_per_backend,"protected_backends":report.backends.len(),"report_saved":true,"retain_until":until,"storage":target}),
                 );
             }
             anyhow::ensure!(
                 dr_storage.is_none() && retain_days.is_none() && report.is_none(),
                 "protected options require immutable storage configuration"
             );
-            let operator = config.operator()?;
+            let store = config.store()?;
             let report = tokio::runtime::Runtime::new()?.block_on(
-                bunker::checkpoint::replicate(&repo, &operator, snapshot.as_deref()),
+                bunker::checkpoint::replicate(&repo, &store, snapshot.as_deref()),
             )?;
-            print(report)
+            let target = config.target_summary();
+            repo.audit(
+                "replicated",
+                serde_json::json!({"namespace":report.namespace,"storage":target,"immutable":false}),
+            )?;
+            let mut value = serde_json::to_value(report)?;
+            value["immutable"] = serde_json::Value::Bool(false);
+            value["storage"] = target;
+            print(value)
         }
         Command::Init
         | Command::SessionRun { .. }
@@ -1220,10 +1366,7 @@ fn main() {
         if let Some(exit) = error.downcast_ref::<SessionExit>() {
             std::process::exit(exit.0);
         }
-        eprintln!(
-            "{}",
-            serde_json::json!({"level":"error","message":error.to_string()})
-        );
+        bunker::logging::error(&format!("{error:#}"), serde_json::Value::Null);
         std::process::exit(1);
     }
 }

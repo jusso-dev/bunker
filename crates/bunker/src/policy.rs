@@ -5,6 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Scheduler tick slack added to the latest on-time cycle before a backup counts as missed.
+pub const MISSED_BACKUP_GRACE_SECONDS: u64 = 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
@@ -22,9 +25,12 @@ pub struct Policy {
     pub immutable: bool,
     pub region: Option<String>,
     pub dr_repository: Option<String>,
-    /// Desired policy only. Automated boot/MCP restore probes are not implemented.
+    /// Interval between scheduled boot/MCP restore probes. They run only when a
+    /// trusted probe configuration (`daemon --probe-config` or host mode) is supplied.
     pub restore_test_interval_seconds: u64,
     pub mass_delete_threshold: usize,
+    /// No successful backup for this long is a missed backup; unset uses interval+jitter+60s.
+    pub missed_backup_seconds: Option<u64>,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -42,6 +48,7 @@ impl Default for Policy {
             dr_repository: None,
             restore_test_interval_seconds: 86400,
             mass_delete_threshold: 20,
+            missed_backup_seconds: None,
         }
     }
 }
@@ -75,6 +82,12 @@ impl Policy {
         if self.jitter_seconds > self.interval_seconds {
             bail!("jitter_seconds must not exceed interval_seconds");
         }
+        if self
+            .missed_backup_seconds
+            .is_some_and(|s| !(60..=2_592_000).contains(&s))
+        {
+            bail!("missed_backup_seconds must be 60..2592000");
+        }
         if self.size_cap_bytes == 0
             || self.max_file_bytes == 0
             || self.max_file_bytes > self.size_cap_bytes
@@ -95,5 +108,15 @@ impl Policy {
             globset::Glob::new(pattern).context("invalid exclusion glob")?;
         }
         Ok(())
+    }
+    /// Seconds after the last success at which a backup counts as missed. Never earlier
+    /// than the latest on-time cycle (interval + jitter + one minute of tick grace), so a
+    /// threshold at or below the cadence cannot alert on every on-time capture.
+    pub fn missed_backup_after(&self) -> u64 {
+        let on_time = self
+            .interval_seconds
+            .saturating_add(self.jitter_seconds)
+            .saturating_add(MISSED_BACKUP_GRACE_SECONDS);
+        self.missed_backup_seconds.unwrap_or(0).max(on_time)
     }
 }

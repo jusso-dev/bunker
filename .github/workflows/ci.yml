@@ -24,7 +24,8 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      # Report every failing test binary, not just the first.
+      - run: cargo test --workspace --locked --no-fail-fast
       - run: cargo build --workspace --release --locked
       - name: Rust dependency advisory audit
         if: runner.os == 'Linux'
@@ -40,6 +41,30 @@ jobs:
           binary=target/release/bunker
           if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
           python packaging/scripts/smoke_restore.py --binary "$binary"
+  storage-emulators:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Start HTTPS MinIO and Azurite with a disposable CA
+        run: crates/bunker/tests/emulators/start.sh "$RUNNER_TEMP/storage-emulators"
+        env:
+          BUNKER_TEST_DOCKER_CONTEXT: default
+      - name: Snapshot, replicate, recover and enforce Object Lock
+        run: |
+          set -a
+          source "$RUNNER_TEMP/storage-emulators/emulators.env"
+          set +a
+          cargo test -p bunker --test storage_emulators --locked -- --nocapture
+        env:
+          BUNKER_TEST_REQUIRE_EMULATORS: '1'
+      - name: Remove emulator containers
+        if: always()
+        run: crates/bunker/tests/emulators/start.sh --stop
+        env:
+          BUNKER_TEST_DOCKER_CONTEXT: default
   control-plane:
     runs-on: ubuntu-latest
     services:
@@ -67,6 +92,10 @@ jobs:
           node-version: '22'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Generated OpenAPI contract and TypeScript client have not drifted
+        run: |
+          pnpm --filter @bunker/control-plane generate:api
+          git diff --exit-code
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
@@ -100,7 +129,7 @@ jobs:
       - run: python packaging/scripts/validate.py
       - run: python packaging/scripts/test_packaging.py
       - run: node --test .github/actions/snapshot/action.test.cjs
-      - run: shellcheck packaging/scripts/*.sh deploy/*.sh
+      - run: shellcheck packaging/scripts/*.sh deploy/*.sh crates/bunker/tests/emulators/*.sh
       - run: mkdocs build --strict --config-file docs/user/mkdocs.yml --site-dir "$RUNNER_TEMP/bunker-docs"
       - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
         with:

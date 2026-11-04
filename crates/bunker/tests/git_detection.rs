@@ -1,4 +1,6 @@
 //! Public summary/authentication regressions; fixture-only, offline Git.
+// Git-aware capture and restore are Unix-only in v1 (docs/git-recovery.md).
+#![cfg(unix)]
 use bunker::{
     policy::Policy,
     repository::{Manifest, Repository},
@@ -33,6 +35,11 @@ fn git(root: &Path, args: &[&str]) -> String {
             "core.hooksPath=/dev/null",
             "-c",
             "core.fsmonitor=false",
+            // Detached auto-maintenance can write into .git while a capture reads it.
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
             "-c",
             "protocol.allow=never",
         ])

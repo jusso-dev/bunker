@@ -10,7 +10,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -130,6 +130,15 @@ pub trait RestoreRepository {
     fn request(&self, id: &str) -> Result<Value>;
     fn audit(&self, event: &str, detail: Value) -> Result<()>;
     fn execute(&self, plan: &RestorePlan, selection: Option<&str>) -> Result<()>;
+    /// Capture current destination state before a destructive restore under the host's
+    /// effective capture policy; `None` when nothing existing would be overwritten.
+    fn pre_restore_snapshot(
+        &self,
+        _plan: &RestorePlan,
+        _policy: &Policy,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
     fn execute_before(
         &self,
         plan: &RestorePlan,
@@ -195,6 +204,11 @@ impl RestoreRepository for Repository {
     fn audit(&self, event: &str, detail: Value) -> Result<()> {
         self.audit(event, detail)
     }
+    fn pre_restore_snapshot(&self, plan: &RestorePlan, policy: &Policy) -> Result<Option<String>> {
+        Ok(self
+            .pre_restore_snapshot(plan, policy)?
+            .map(|manifest| manifest.id))
+    }
     fn execute(&self, plan: &RestorePlan, selection: Option<&str>) -> Result<()> {
         // Core re-plans and compares confirmation again, then uses capability-safe filesystem access.
         self.restore_with_options(
@@ -222,11 +236,23 @@ impl ConsumedRequests {
     pub fn path(&self) -> &Path {
         &self.directory
     }
+    fn marker(&self, identity: HostIdentity, request: Uuid) -> PathBuf {
+        self.directory.join(
+            identity
+                .scoped_id("consumed-restore", &request.to_string())
+                .to_string(),
+        )
+    }
+    /// Any existing marker (including a partial one) counts as consumed.
+    fn is_consumed(&self, identity: HostIdentity, request: Uuid) -> Result<bool> {
+        match std::fs::symlink_metadata(self.marker(identity, request)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
     fn consume(&self, identity: HostIdentity, request: Uuid) -> Result<()> {
-        let name = identity
-            .scoped_id("consumed-restore", &request.to_string())
-            .to_string();
-        let path = self.directory.join(name);
+        let path = self.marker(identity, request);
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -237,9 +263,11 @@ impl ConsumedRequests {
         let mut file = options
             .open(path)
             .context("restore already consumed or durable claim state unavailable")?;
+        #[cfg(windows)]
+        crate::win_acl::check_file(&file)?;
         file.write_all(b"consumed-before-claim-v1\n")?;
         file.sync_all()?;
-        File::open(&self.directory)?.sync_all()?;
+        crate::repository::sync_ambient_dir(&self.directory)?;
         Ok(())
     }
 }
@@ -257,7 +285,7 @@ fn destination_identity(path: &Path) -> Result<DestinationIdentity> {
             path.canonicalize()? == path,
             "restore destination must remain canonical"
         );
-        let meta = fs::symlink_metadata(path)?;
+        let meta = std::fs::symlink_metadata(path)?;
         ensure!(
             meta.is_dir() && !meta.file_type().is_symlink(),
             "restore destination changed"
@@ -267,7 +295,16 @@ fn destination_identity(path: &Path) -> Result<DestinationIdentity> {
             inode: meta.ino(),
         })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        ensure!(
+            crate::win_acl::same_path(path, &path.canonicalize()?),
+            "restore destination must remain canonical"
+        );
+        let (device, inode) = crate::win_acl::directory_identity(path)?;
+        Ok(DestinationIdentity { device, inode })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         bail!("destination identity validation not supported on this platform")
@@ -392,7 +429,7 @@ impl<T: Transport> HostClient<T> {
 
     /// MCP/CLI adapter: creates a remote human-review request, never approves or executes it.
     /// Only single-file or entire-snapshot-in-place scope is supported. A full snapshot is sent
-    /// as workspace; session remapping and deletes are intentionally not exposed.
+    /// as workspace, a derived session rollback as session; deletes are intentionally not exposed.
     /// Display local_restore_preview after creation to review this exact frozen diff locally.
     pub fn request_restore(
         &mut self,
@@ -448,7 +485,7 @@ impl<T: Transport> HostClient<T> {
         let value = self.post(
             "/restores",
             &json!({"snapshotId":self.identity.snapshot_id(snapshot)?,
-            "kind":if selection.is_some(){"file"}else{"workspace"},
+            "kind":restore_kind(&manifest, selection),
             "manifestDigest":frozen.manifest_digest,"diffDigest":diff_digest,"changes":changes}),
         )?;
         let created: CreatedRequest = serde_json::from_value(value)
@@ -475,14 +512,17 @@ impl<T: Transport> HostClient<T> {
 
     /// Explicit operator/daemon step for a particular locally persisted request. Polling approved
     /// metadata alone MUST NOT call this automatically without the matching local request handle.
-    /// Consumes durable local state BEFORE the single fetch and claim. Any failure thereafter
-    /// requires a new request, including pending status, stale state, timeout, or process crash.
+    /// The pre-restore safety snapshot (under `policy`, the host's effective capture policy) is
+    /// taken first; its failure leaves the request unconsumed and retryable. Durable local state
+    /// is then consumed BEFORE the single fetch and claim. Any failure thereafter requires a new
+    /// request, including pending status, stale state, timeout, or process crash.
     pub fn execute_restore_once(
         &mut self,
         repo: &impl RestoreRepository,
         consumed: &ConsumedRequests,
         local_request_id: &str,
-    ) -> Result<()> {
+        policy: &Policy,
+    ) -> Result<Option<String>> {
         let saved: SavedRequest = serde_json::from_value(repo.request(local_request_id)?)
             .context("invalid encrypted bridge request")?;
         ensure!(
@@ -496,6 +536,25 @@ impl<T: Transport> HostClient<T> {
             saved.diff_digest == protected_digest(repo, "restore-plan", &saved.frozen)?,
             "frozen restore digest mismatch"
         );
+        ensure!(
+            !consumed.is_consumed(self.identity, saved.server_request)?,
+            "restore already consumed; create a new request"
+        );
+        self.validate_current(repo, &saved)?;
+        // Undo point before any irreversible step: a failure here burns no approval.
+        let safety = match repo.pre_restore_snapshot(&saved.frozen.plan, policy) {
+            Ok(safety) => safety,
+            Err(error) => {
+                let _ = repo.audit(
+                    "remote_restore_safety_snapshot_failed",
+                    json!({"request":saved.server_request,"diff_digest":saved.diff_digest}),
+                );
+                return Err(error.context(
+                    "pre-restore safety snapshot failed; restore not started and request not consumed; fix the cause and retry execute-restore",
+                ));
+            }
+        };
+        // The snapshot can take time: recheck expiry and destination before consuming.
         self.validate_current(repo, &saved)?;
         consumed.consume(self.identity, saved.server_request)?;
         repo.audit(
@@ -525,7 +584,7 @@ impl<T: Transport> HostClient<T> {
             self.validate_current(repo, &saved)?;
             repo.audit(
                 "remote_restore_execution_started",
-                json!({"request":saved.server_request,"diff_digest":saved.diff_digest}),
+                json!({"request":saved.server_request,"diff_digest":saved.diff_digest,"pre_restore_snapshot":safety}),
             )?;
             ensure!(
                 Utc::now() < claim.expires_at && Utc::now() < saved.expires_at,
@@ -535,7 +594,8 @@ impl<T: Transport> HostClient<T> {
                 &saved.frozen.plan,
                 saved.frozen.selection.as_deref(),
                 claim.expires_at.min(saved.expires_at),
-            )
+            )?;
+            Ok(safety)
         })();
         let status = if result.is_ok() {
             "succeeded"
@@ -551,7 +611,7 @@ impl<T: Transport> HostClient<T> {
             &format!("/restores/{}/complete", saved.server_request),
             &json!({"status":status,"diffDigest":saved.diff_digest}),
         );
-        result?;
+        let safety = result?;
         audit?;
         let completion = completion
             .context("restore executed once; completion delivery uncertain; do not re-execute")?;
@@ -559,7 +619,7 @@ impl<T: Transport> HostClient<T> {
             completion["id"] == saved.server_request.to_string() && completion["status"] == status,
             "restore executed once; completion acknowledgement mismatch; do not re-execute"
         );
-        Ok(())
+        Ok(safety)
     }
     fn validate_current(&self, repo: &impl RestoreRepository, saved: &SavedRequest) -> Result<()> {
         ensure!(
@@ -588,6 +648,16 @@ impl<T: Transport> HostClient<T> {
             "restore plan or destination is stale"
         );
         Ok(())
+    }
+}
+/// A derived session rollback is reviewed as `session` unless narrowed to one file.
+fn restore_kind(manifest: &Manifest, selection: Option<&str>) -> &'static str {
+    if selection.is_some() {
+        "file"
+    } else if manifest.trigger == crate::repository::SESSION_ROLLBACK {
+        "session"
+    } else {
+        "workspace"
     }
 }
 fn metadata_changes(repo: &impl RestoreRepository, frozen: &FrozenPlan) -> Result<Vec<Value>> {
@@ -668,11 +738,10 @@ fn validate_remote(
                     .snapshot_id(&saved.frozen.plan.snapshot)?
                     .to_string()
             && body["kind"]
-                == if saved.frozen.selection.is_some() {
-                    "file"
-                } else {
-                    "workspace"
-                }
+                == restore_kind(
+                    &repo.manifest(&saved.frozen.plan.snapshot)?,
+                    saved.frozen.selection.as_deref(),
+                )
             && body["changes"] == serde_json::to_value(metadata_changes(repo, &saved.frozen)?)?,
         "remote restore plan binding mismatch"
     );
@@ -804,6 +873,7 @@ impl LocalBindings {
             retention_days: remote.retention_days,
             restore_test_interval_seconds: remote.restore_test_interval_hours * 3600,
             mass_delete_threshold: remote.mass_delete_threshold,
+            missed_backup_seconds: Some(remote.missed_backup_minutes * 60),
             ..Policy::default()
         };
         policy.validate()?;
@@ -939,13 +1009,20 @@ pub struct CycleReport {
 pub struct HostService<T: Transport> {
     pub client: HostClient<T>,
     last_policy_poll: Option<Instant>,
+    last_success: u64,
 }
 impl<T: Transport> HostService<T> {
     pub fn new(client: HostClient<T>) -> Self {
         Self {
             client,
             last_policy_poll: None,
+            last_success: 0,
         }
+    }
+    /// Durable time of the last successful capture; a failure after a newer success
+    /// raises a new backup-failed alert instead of joining the earlier one.
+    pub fn set_last_success(&mut self, at: u64) {
+        self.last_success = at;
     }
     /// Invoke on a 30-second daemon tick. The callback is the existing trusted scheduler; it must
     /// honor interval/exclusions/cap and return only actual results. Errors invalidate the cycle.
@@ -983,19 +1060,7 @@ impl<T: Transport> HostService<T> {
             "host cycle called before 30-second policy tick"
         );
         // Keep no executable cached policy: every eligible tick authenticates and fetches anew.
-        let value = self.client.get("/policies")?;
-        let mut policies: Vec<PolicyEnvelope> =
-            serde_json::from_value(value).context("invalid effective policy response")?;
-        ensure!(
-            policies.len() == 1,
-            "host has no single effective policy; work disabled"
-        );
-        let remote = policies.remove(0);
-        ensure!(
-            !remote.id.is_nil() && remote.version > 0,
-            "invalid policy identity/version"
-        );
-        let local = bindings.validate(repo, &remote.body, self.client.identity)?;
+        let (remote, local) = self.client.effective_policy(repo, bindings)?;
         ensure!(
             !session || (bindings.session_handler && remote.body.end_of_session),
             "end-of-session policy or local handler disabled"
@@ -1017,7 +1082,13 @@ impl<T: Transport> HostService<T> {
             Ok(results) => results,
             Err(error) => {
                 let report = self.client.publish_alert(&ObservedAlert {
-                    event_id: Uuid::new_v4(),
+                    event_id: failure_event_id(
+                        self.client.identity.host,
+                        remote.id,
+                        local.interval_seconds,
+                        self.last_success,
+                        crate::repository::now(),
+                    ),
                     kind: AlertKind::BackupFailed,
                     critical: true,
                     snapshot: None,
@@ -1063,7 +1134,58 @@ impl<T: Transport> HostService<T> {
         Ok(report)
     }
 }
+/// Repeated failures for one host and policy within one interval-sized window, with no
+/// successful capture in between, share an event ID, so retries raise the existing alert's
+/// occurrence count instead of new alerts. A success starts a new failure episode.
+pub fn failure_event_id(
+    host: Uuid,
+    policy: Uuid,
+    interval_seconds: u64,
+    last_success: u64,
+    at: u64,
+) -> Uuid {
+    let window = at / interval_seconds.max(1);
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("bunker:backup_failed:{host}:{policy}:{interval_seconds}:{last_success}:{window}")
+            .as_bytes(),
+    )
+}
 impl<T: Transport> HostClient<T> {
+    /// Authenticated effective policy, validated against the local bindings exactly as
+    /// for host captures. Never cached.
+    fn effective_policy(
+        &mut self,
+        repo: &Repository,
+        bindings: &LocalBindings,
+    ) -> Result<(PolicyEnvelope, Policy)> {
+        let value = self.get("/policies")?;
+        let mut policies: Vec<PolicyEnvelope> =
+            serde_json::from_value(value).context("invalid effective policy response")?;
+        ensure!(
+            policies.len() == 1,
+            "host has no single effective policy; work disabled"
+        );
+        let remote = policies.remove(0);
+        ensure!(
+            !remote.id.is_nil() && remote.version > 0,
+            "invalid policy identity/version"
+        );
+        let local = bindings.validate(repo, &remote.body, self.identity)?;
+        Ok((remote, local))
+    }
+    /// Restore safety snapshots use the same authenticated policy (exclusions, size cap)
+    /// as host captures, never a local default.
+    pub fn execute_restore_with_bindings(
+        &mut self,
+        repo: &Repository,
+        consumed: &ConsumedRequests,
+        local_request_id: &str,
+        bindings: &LocalBindings,
+    ) -> Result<Option<String>> {
+        let (_, policy) = self.effective_policy(repo, bindings)?;
+        self.execute_restore_once(repo, consumed, local_request_id, &policy)
+    }
     pub fn publish_alert(&mut self, alert: &ObservedAlert) -> Result<()> {
         ensure!(
             !alert.event_id.is_nil() && alert.count <= 10_000_000,
@@ -1194,6 +1316,13 @@ impl ProductionHost {
         self.refresh()?;
         self.service.session_cycle(repo, bindings, work)
     }
+    pub(crate) fn set_last_success(&mut self, at: u64) {
+        self.service.set_last_success(at);
+    }
+    pub(crate) fn publish_alert(&mut self, alert: &ObservedAlert) -> Result<()> {
+        self.refresh()?;
+        self.service.client.publish_alert(alert)
+    }
     pub fn request_restore(
         &mut self,
         repo: &Repository,
@@ -1213,12 +1342,14 @@ impl ProductionHost {
             .client
             .request_restore(repo, consumed, snapshot, &destination, selection)
     }
+    /// `bindings` must be the same local bindings host captures use for this destination.
     pub fn execute_restore_once(
         &mut self,
         repo: &Repository,
         consumed: &ConsumedRequests,
         local_request_id: &str,
-    ) -> Result<()> {
+        bindings: &LocalBindings,
+    ) -> Result<Option<String>> {
         self.refresh()?;
         // Refuse requests prepared by a different integration with a destination around credentials.
         let saved: SavedRequest = serde_json::from_value(repo.request(local_request_id)?)?;
@@ -1228,8 +1359,11 @@ impl ProductionHost {
                 && !self.store.directory().starts_with(&destination),
             "restore destination overlaps host credential state"
         );
-        self.service
-            .client
-            .execute_restore_once(repo, consumed, local_request_id)
+        self.service.client.execute_restore_with_bindings(
+            repo,
+            consumed,
+            local_request_id,
+            bindings,
+        )
     }
 }

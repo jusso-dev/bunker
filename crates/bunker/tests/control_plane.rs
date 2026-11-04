@@ -35,12 +35,16 @@ fn identity() -> HostIdentity {
 }
 fn private_dir(root: &Path, name: &str) -> PathBuf {
     let dir = root.join(name);
-    fs::create_dir(&dir).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        fs::create_dir(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
+    // A plain directory inherits its parent's ACL and is rejected; let Bunker create it
+    // with a protected owner-only DACL instead.
+    #[cfg(windows)]
+    CredentialStore::open(&root.canonicalize().unwrap().join(name)).unwrap();
     dir.canonicalize().unwrap()
 }
 fn key() -> PKey<Private> {
@@ -297,6 +301,10 @@ fn enrollment(
         assert_eq!(r.body.as_object().unwrap().len(), 2);
         (201, issue(r.body["csr"].as_str().unwrap(), &ck, &cc, mode))
     });
+    // On Windows the token inherits owner-only access from a Bunker-created directory.
+    #[cfg(windows)]
+    let token = private_dir(root, "token").join("token");
+    #[cfg(not(windows))]
     let token = root.join("token");
     fs::write(&token, "disposable-token-never-production-123456\n").unwrap();
     #[cfg(unix)]
@@ -709,16 +717,33 @@ fn metadata_only_encrypted_plan_one_shot_claim_completion_and_restart_replay() {
     assert!(!String::from_utf8_lossy(&encrypted).contains("private content"));
     assert!(state.lock().unwrap().claim.is_none());
     assert_eq!(f.content(), "changed private content");
-    client
-        .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
-        .unwrap();
+    let safety = client
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
+        .unwrap()
+        .expect("host-approved overwrite takes a pre-restore snapshot");
     assert_eq!(f.content(), "original private content");
+    let manifest = f.repo.manifest(&safety).unwrap();
+    assert_eq!(manifest.trigger, "pre-restore");
+    assert_eq!(
+        &*f.repo.file_bytes(&manifest.files[0]).unwrap(),
+        b"changed private content"
+    );
     let before = state.lock().unwrap().calls.len();
     let reopened = ConsumedRequests::open(f.consumed.path()).unwrap();
     // Put the destination back to its original before-state; replay still cannot claim or write.
     fs::write(f.work.join("private-name.txt"), "changed private content").unwrap();
     assert!(client
-        .execute_restore_once(&f.repo, &reopened, &request.local_request_id)
+        .execute_restore_once(
+            &f.repo,
+            &reopened,
+            &request.local_request_id,
+            &policy::Policy::default()
+        )
         .is_err());
     assert_eq!(state.lock().unwrap().calls.len(), before);
     assert_eq!(f.content(), "changed private content");
@@ -752,7 +777,12 @@ fn stale_destination_manifest_and_replaced_directory_never_claim() {
             }
         }
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert!(state.lock().unwrap().claim.is_none());
     }
@@ -777,12 +807,22 @@ fn denied_expired_cross_tenant_bad_claim_and_ambiguous_claim_never_write_or_retr
             }
         }
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert_eq!(f.content(), "changed private content");
         let calls = state.lock().unwrap().calls.len();
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert_eq!(state.lock().unwrap().calls.len(), calls);
     }
@@ -804,7 +844,12 @@ fn destination_mutated_during_claim_reports_failure_and_completion_loss_never_re
             }
         }
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert_eq!(
             f.content(),
@@ -816,7 +861,12 @@ fn destination_mutated_during_claim_reports_failure_and_completion_loss_never_re
         );
         let calls = state.lock().unwrap().calls.len();
         assert!(client
-            .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+            .execute_restore_once(
+                &f.repo,
+                &f.consumed,
+                &request.local_request_id,
+                &policy::Policy::default()
+            )
             .is_err());
         assert_eq!(state.lock().unwrap().calls.len(), calls);
         let expected = if mutate { "failed" } else { "succeeded" };
@@ -827,6 +877,89 @@ fn destination_mutated_during_claim_reports_failure_and_completion_loss_never_re
             .iter()
             .any(|(p, b)| p.ends_with("/complete") && b["status"] == expected));
     }
+}
+#[test]
+fn failed_safety_snapshot_leaves_request_retryable_and_reports_cause() {
+    let f = RestoreFixture::new();
+    let transport = FakeTransport::new();
+    let state = transport.0.clone();
+    let mut client = HostClient::new(transport, identity());
+    let request = f.request(&mut client);
+    let excluding = policy::Policy {
+        exclusions: vec!["private-name.txt".into()],
+        ..policy::Policy::default()
+    };
+    let error = client
+        .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id, &excluding)
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("request not consumed"), "{message}");
+    assert!(message.contains("omitted a file to overwrite"), "{message}");
+    // Nothing irreversible happened: no fetch, claim, completion, consumption or write.
+    {
+        let s = state.lock().unwrap();
+        assert!(s.claim.is_none());
+        assert!(!s.calls.iter().any(|(path, _)| path.contains("/restores/")));
+    }
+    assert_eq!(fs::read_dir(f.consumed.path()).unwrap().count(), 0);
+    assert_eq!(f.content(), "changed private content");
+    // After fixing the cause the same human approval executes once.
+    let safety = client
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
+        .unwrap()
+        .expect("overwrite takes a safety snapshot");
+    assert_eq!(f.content(), "original private content");
+    assert_eq!(f.repo.manifest(&safety).unwrap().trigger, "pre-restore");
+    assert!(client
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
+        .is_err());
+}
+#[test]
+fn host_safety_snapshot_uses_authenticated_bindings_policy() {
+    let f = RestoreFixture::new();
+    let transport = FakeTransport::new();
+    let state = transport.0.clone();
+    let mut policies = policy_value();
+    policies[0]["body"]["exclusions"] = json!(["private-name.txt"]);
+    state.lock().unwrap().policy = Some(policies);
+    let mut client = HostClient::new(transport, identity());
+    let request = f.request(&mut client);
+    let bindings =
+        LocalBindings::local_repository(&f.repo, "local-repository", "wrapped-key").unwrap();
+    // The administrator's exclusion applies to the safety snapshot, so it cannot cover the
+    // overwritten file; the restore is refused before consumption rather than run unprotected.
+    let error = client
+        .execute_restore_with_bindings(&f.repo, &f.consumed, &request.local_request_id, &bindings)
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted a file to overwrite"),
+        "{error:#}"
+    );
+    assert!(state.lock().unwrap().claim.is_none());
+    assert_eq!(fs::read_dir(f.consumed.path()).unwrap().count(), 0);
+    assert_eq!(f.content(), "changed private content");
+    state.lock().unwrap().policy = Some(policy_value());
+    let safety = client
+        .execute_restore_with_bindings(&f.repo, &f.consumed, &request.local_request_id, &bindings)
+        .unwrap()
+        .unwrap();
+    assert_eq!(f.content(), "original private content");
+    assert_eq!(
+        &*f.repo
+            .file_bytes(&f.repo.manifest(&safety).unwrap().files[0])
+            .unwrap(),
+        b"changed private content"
+    );
 }
 #[test]
 fn ambiguous_creation_is_once_and_keeps_only_encrypted_local_intent() {
@@ -854,6 +987,98 @@ fn ambiguous_creation_is_once_and_keeps_only_encrypted_local_intent() {
             .unwrap()
             .count(),
         1
+    );
+}
+#[test]
+fn session_rollback_is_requested_approved_and_executed_as_session_kind() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root.join("repo"), "fixture-only-passphrase").unwrap();
+    let work = root.join("work");
+    fs::create_dir(&work).unwrap();
+    fs::write(work.join("edited.txt"), "pre-session").unwrap();
+    fs::write(work.join("removed.txt"), "pre-session removed").unwrap();
+    let capture = |trigger: &str| {
+        repo.snapshot(
+            &work,
+            &policy::Policy::default(),
+            Some("codex".into()),
+            Some("private-bridge-session".into()),
+            trigger,
+        )
+        .unwrap()
+    };
+    capture(repository::SESSION_START);
+    fs::write(work.join("edited.txt"), "agent edit").unwrap();
+    fs::remove_file(work.join("removed.txt")).unwrap();
+    fs::write(work.join("created.txt"), "agent created").unwrap();
+    capture(repository::SESSION_END);
+    let rollback = repo
+        .session_rollback("private-bridge-session", &work)
+        .unwrap();
+    let consumed = ConsumedRequests::open(&private_dir(&root, "consumed")).unwrap();
+    let transport = FakeTransport::new();
+    let state = transport.0.clone();
+    let mut client = HostClient::new(transport, identity());
+    // The fixture server reuses one request ID, so the refused attempt has its own claim state.
+    let refused = ConsumedRequests::open(&private_dir(&root, "consumed-refused")).unwrap();
+    let request = client
+        .request_restore(&repo, &refused, &rollback.rollback_snapshot, &work, None)
+        .unwrap();
+    {
+        let state = state.lock().unwrap();
+        let body = state.restore.as_ref().unwrap();
+        assert_eq!(body["kind"], "session");
+        let actions: Vec<_> = body["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(actions.len(), 2);
+        assert!(actions.contains(&"replace") && actions.contains(&"create"));
+        let wire = serde_json::to_string(&state.calls).unwrap();
+        for secret in ["private-bridge-session", "edited.txt", "pre-session"] {
+            assert!(!wire.contains(secret));
+        }
+    }
+    // An approval relabelled as a workspace restore is refused without writing.
+    state.lock().unwrap().restore.as_mut().unwrap()["kind"] = json!("workspace");
+    assert!(client
+        .execute_restore_once(
+            &repo,
+            &refused,
+            &request.local_request_id,
+            &policy::Policy::default()
+        )
+        .is_err());
+    assert_eq!(
+        fs::read_to_string(work.join("edited.txt")).unwrap(),
+        "agent edit"
+    );
+    let request = client
+        .request_restore(&repo, &consumed, &rollback.rollback_snapshot, &work, None)
+        .unwrap();
+    client
+        .execute_restore_once(
+            &repo,
+            &consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(work.join("edited.txt")).unwrap(),
+        "pre-session"
+    );
+    assert_eq!(
+        fs::read_to_string(work.join("removed.txt")).unwrap(),
+        "pre-session removed"
+    );
+    // Restore never deletes; the session-created file stays for manual review.
+    assert_eq!(
+        fs::read_to_string(work.join("created.txt")).unwrap(),
+        "agent created"
     );
 }
 #[test]
@@ -1180,7 +1405,12 @@ fn concurrent_executors_have_exactly_one_durable_claim_winner() {
             let mut client = HostClient::new(transport.clone(), identity());
             barrier.wait();
             client
-                .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+                .execute_restore_once(
+                    &f.repo,
+                    &f.consumed,
+                    &request.local_request_id,
+                    &policy::Policy::default(),
+                )
                 .is_ok()
         };
         let left = scope.spawn(run);
@@ -1210,14 +1440,24 @@ fn invalid_completion_ack_does_not_report_success_or_allow_execution_replay() {
     let request = f.request(&mut client);
     state.lock().unwrap().completion_bad_ack = true;
     let error = client
-        .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default(),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("acknowledgement mismatch"));
     assert_eq!(f.content(), "original private content");
     let calls = state.lock().unwrap().calls.len();
     fs::write(f.work.join("private-name.txt"), "changed private content").unwrap();
     assert!(client
-        .execute_restore_once(&f.repo, &f.consumed, &request.local_request_id)
+        .execute_restore_once(
+            &f.repo,
+            &f.consumed,
+            &request.local_request_id,
+            &policy::Policy::default()
+        )
         .is_err());
     assert_eq!(state.lock().unwrap().calls.len(), calls);
 }
@@ -1262,4 +1502,127 @@ fn policy_binding_detects_actual_key_header_change_before_scheduler_work() {
         .err()
         .unwrap();
     assert!(error.to_string().contains("binding changed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn host_runtime_answers_local_status_and_stops_cleanly() {
+    use std::{
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (ca_key, ca) = ca();
+    enrollment(&root, &ca_key, &ca, Issue::Good).unwrap();
+    let ca_file = root.join("server-ca.pem");
+    fs::write(&ca_file, ca.to_pem().unwrap()).unwrap();
+    let repo = root.join("repo");
+    Repository::init(&repo, "host-status-fixture").unwrap();
+    let work = root.join("work");
+    fs::create_dir(&work).unwrap();
+    fs::write(work.join("file"), "fixture").unwrap();
+    // Nothing listens here: every cycle fails and the runtime keeps retrying.
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let config = root.join("host.toml");
+    fs::write(
+        &config,
+        toml::to_string(&bunker::host_runtime::HostConfig {
+            public_origin: format!("https://localhost:{}", closed.port()),
+            host_origin: format!("https://localhost:{}", closed.port()),
+            tenant: identity().tenant,
+            credential_directory: root.join("credentials"),
+            consumed_directory: private_dir(&root, "consumed"),
+            server_ca_file: Some(ca_file),
+            storage_ref: "local-repository".into(),
+            key_ref: "wrapped-key".into(),
+            setup_home: None,
+            probe_config: None,
+            storage: None,
+            session_handler: false,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bunker"));
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .env("BUNKER_PASSPHRASE", "host-status-fixture")
+            .env_remove("BUNKER_LOG");
+        command
+    };
+    let mut child = command()
+        .args(["host", "--config"])
+        .arg(&config)
+        .args(["run", "--workspace"])
+        .arg(&work)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut status = None;
+    while Instant::now() < deadline && child.try_wait().unwrap().is_none() {
+        let output = command().arg("status").output().unwrap();
+        if output.status.success() {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            if value["state"]["consecutive_failures"].as_u64() >= Some(1) {
+                status = Some(value);
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let Some(status) = status else {
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+        panic!(
+            "host status unavailable: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    assert_eq!(status["running"], true);
+    assert_eq!(status["mode"], "host");
+    assert_eq!(status["host"], identity().host.to_string());
+    assert!(status["state"]["next_cycle_at"].as_u64().unwrap() > 0);
+    let wire = status.to_string();
+    assert!(
+        !wire.contains(root.to_str().unwrap()),
+        "status leaked a path"
+    );
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let exit = loop {
+        if let Some(exit) = child.try_wait().unwrap() {
+            break exit;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("host runtime ignored SIGTERM");
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        exit.success(),
+        "host runtime did not exit cleanly: {exit:?}"
+    );
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(
+        stderr.contains("\"event\":\"host_cycle_failed\""),
+        "{stderr}"
+    );
+    assert!(stderr.contains("\"event\":\"daemon_stopped\""), "{stderr}");
+    assert!(!repo.join("daemon.sock").exists());
+    assert!(!command().arg("status").output().unwrap().status.success());
 }

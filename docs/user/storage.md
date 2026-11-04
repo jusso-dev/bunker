@@ -36,6 +36,40 @@ Use `service = "r2"`, `options.bucket`, `options.region = "auto"`, and the accou
 
 Use `service = "azure"`, `options.container`, `options.account_name`, and the account's HTTPS blob `options.endpoint`. Supply `account_key` or `sas_token` through `credential_env`, with the smallest required scope and lifetime. Repository key wrapping can use Azure Key Vault independently of Blob credentials. The protected adapter requires account-key authorization and version-level locked immutability; ordinary replication also supports SAS.
 
+## Upload tuning and region records
+
+Ordinary OpenDAL replication accepts these non-secret `[options]` entries:
+
+```toml
+upload_bytes_per_second = "1048576"
+multipart_chunk_bytes = "8388608"
+```
+
+The upload budget spaces object starts at the configured long-run average (minimum
+65,536 bytes/second). It permits an initial burst of one object, up to 64 MiB;
+this is not a strict network-interface traffic shaper. Each CLI operation has its
+own budget; retries may send extra bytes, and concurrent processes do not share
+a global cap. OpenDAL's retry layer supplies bounded retries, not bandwidth
+control. Verification downloads have no byte-rate limit; rechecking an existing
+object can still consume an upload-budget slot.
+`multipart_chunk_bytes` selects OpenDAL's multipart/block upload chunk size for
+S3/R2/Azure, from 5 MiB through 64 MiB inclusive; conditional final publication
+still prevents overwriting an existing object. Local targets reject that option.
+The protected and exact-ID consumer adapters reject these tuning options rather
+than silently ignoring them; they retain their own bounded request contracts.
+
+Replication JSON includes `storage.service` and `storage.region`; protected reports
+also include each backend's region, and the local replication audit records the
+target summary. S3 uses its configured signing region, Azure may supply an
+informational `options.region`, and local targets report null. Region is not a
+residency attestation. The `namespace` locator format and encrypted snapshots are
+unchanged: one snapshot may be replicated into several regions. Retain the complete
+JSON/report with the locator to retain this destination information.
+
+Local, Google Drive and OneDrive replication prints an
+`immutability_unsupported` warning on stderr. Stdout remains a single JSON result.
+These destinations provide no object-lock or immutable-retention guarantee.
+
 ## Google Drive and OneDrive
 
 These providers use verified exact file/revision IDs, not name-based OpenDAL listing. Configure an explicit folder ID in `options.root`, OneDrive `options.drive_id`, and exactly three credential environment-variable names: `client_id`, `client_secret`, and `refresh_token`. Obtain consent/initial refresh credentials through the provider's approved OAuth process; Bunker does not open an interactive authorization browser.
@@ -45,7 +79,7 @@ bunker replicate --repo "$BUNKER_REPOSITORY" --storage drive.toml --consumer-sta
 bunker recover --repo "$RECOVERED_REPOSITORY" --storage drive.toml --consumer-state /protected/drive-state --consumer-report /protected/recovery/drive.json --namespace "$REPOSITORY_NAMESPACE"
 ```
 
-Use one canonical owner-only state directory per provider/folder/client. The CLI holds an exclusive lock and atomically persists refresh-token rotations before using the new credential; saved rotations take precedence over an old environment token. Preserve this private state through upgrades and keep it outside captured workspaces/repositories. Invalid, linked or permissive credential files fail closed. Windows ACL support is not implemented.
+Use one canonical owner-only state directory per provider/folder/client. The CLI holds an exclusive lock and atomically persists refresh-token rotations before using the new credential; saved rotations take precedence over an old environment token. Preserve this private state through upgrades and keep it outside captured workspaces/repositories. Invalid, linked or permissive credential files fail closed. On Windows, owner-only means the ACL rules in [host integration](../host-integration.md) point 6: let Bunker create the state directory so it receives a protected DACL for the running user and SYSTEM only.
 
 Before requesting a refresh, the state directory durably records an in-progress
 marker. A lost or ambiguous response therefore blocks reuse of the old token even
@@ -58,7 +92,7 @@ retried locally before another network operation.
 
 The complete report is saved privately before advancing the local checkpoint and then exported to the required external destination. If export fails, use `consumer-report CHECKPOINT_HASH --storage drive.toml --consumer-state /protected/drive-state --output PATH` to re-export it. Keep that report independently of the cloud account. Google recovery pins retained binary revisions; OneDrive requires the saved item ETag/cTag to remain unchanged and refuses altered items. Neither service provides a Bunker WORM/retention guarantee. See [consumer provider protocol](../consumer-storage.md) for exact limits and OAuth recovery failures. Offline fixtures pass; live account behavior still needs acceptance testing.
 
-Cloud services are wired through OpenDAL but provider smoke tests have not been run in this task. Not every allowlisted provider field is valid for every service. Rejection or successful operator construction is not proof that credentials, data residency, retention or recovery work. Keep remote-backend acceptance open until live upload/readback/recovery and failure-mode evidence exists.
+TLS MinIO and Azurite emulator tests exercise encrypted snapshot/replicate/recover/verify through the real OpenDAL configuration; MinIO also exercises compliance-locked versions, deletion refusal and exact-version recovery. These are emulator tests, not live cloud account acceptance. Not every allowlisted provider field is valid for every service. Rejection or successful operator construction is not proof that credentials, data residency, retention or recovery work. Keep remote-backend acceptance open until live upload/readback/recovery and failure-mode evidence exists.
 
 
 ## Protected versions and independent DR

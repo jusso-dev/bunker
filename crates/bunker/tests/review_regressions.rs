@@ -674,7 +674,6 @@ fn r2_corrupt_schedule_preserved_and_audited_before_safe_fallback() {
 #[cfg(unix)]
 #[test]
 fn r2_status_uses_private_unix_socket_and_key_source_variants() {
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     let temp = tempfile::tempdir().unwrap();
     let (repo, work) = setup(temp.path());
     let path = repo.root().to_owned();
@@ -682,9 +681,8 @@ fn r2_status_uses_private_unix_socket_and_key_source_variants() {
     fs::write(work.join("a"), "fixture").unwrap();
     let source = bunker::repository::KeySource::passphrase(PASSPHRASE);
     scheduler::daemon_with_key_source(&path, &source, &work, None, true).unwrap();
-    let meta = fs::metadata(path.join("daemon.sock")).unwrap();
-    assert!(meta.file_type().is_socket());
-    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert!(!path.join("daemon.sock").exists());
+    assert!(scheduler::status(&path).is_err());
     let metadata: serde_json::Value =
         serde_json::from_slice(&fs::read(path.join("daemon.json")).unwrap()).unwrap();
     assert_eq!(metadata["transport"], "unix");

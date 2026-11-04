@@ -178,6 +178,28 @@ export const evidence = z.strictObject({
   mcps: z.array(probe({ name: label })).max(100),
 });
 export type Policy = z.infer<typeof policy>;
+/** Host protected storage verifies S3 Object Lock and Azure version immutability only. */
+export const lockCapableStorage: readonly Policy["storage"][] = ["s3", "azure"];
+export function storageProtectionError(
+  p: Pick<Policy, "storage" | "immutable" | "drCopy">,
+): string | null {
+  if (!p.immutable && !p.drCopy) return null;
+  if (!lockCapableStorage.includes(p.storage))
+    return `${p.storage} storage does not support object lock or immutability; immutable and disaster recovery copies require s3 or azure`;
+  if (p.drCopy && !p.immutable)
+    return "A disaster recovery copy requires immutable primary storage";
+  return null;
+}
+/** Host schedules add up to this much jitter to each backup interval. */
+export const hostJitterAllowanceMinutes = 1;
+/** A threshold at or inside the on-time cadence would alert on every on-time backup. */
+export function missedBackupError(
+  p: Pick<Policy, "intervalMinutes" | "missedBackupMinutes">,
+): string | null {
+  const onTime = p.intervalMinutes + hostJitterAllowanceMinutes;
+  if (p.missedBackupMinutes > onTime) return null;
+  return `Missed backup threshold must be more than ${onTime} minutes (the backup interval plus ${hostJitterAllowanceMinutes} minute of scheduling jitter), or every on-time backup is reported as missed`;
+}
 
 export const certificateRequest = z.strictObject({
   csr: z.string().min(100).max(16384),

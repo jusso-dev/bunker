@@ -403,8 +403,7 @@ pub fn rollback_claude_hook(plan: &HookPlan) -> Result<()> {
         crate::repository::atomic_write(&dir, "settings.json", before, true)?;
     } else {
         dir.remove_file("settings.json")?;
-        #[cfg(unix)]
-        dir.into_std_file().sync_all()?;
+        crate::repository::sync_dir(&dir, std::path::Path::new("."))?;
     }
     Ok(())
 }

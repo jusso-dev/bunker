@@ -12,17 +12,48 @@ This source-install command also works in PowerShell with a configured Rust tool
 
 ## Package candidates
 
-The manually dispatched `Unsigned package candidates` workflow builds Linux x86-64 GNU, macOS arm64/x86-64, and Windows x86-64 MSVC archives. Each archive includes the binary, licence, build record and a CycloneDX Cargo source-dependency inventory. That inventory includes build/dev dependencies and is not a precise linked-binary SBOM. GitHub artifact provenance is requested by the workflow; verify that the attestation step actually succeeded for the downloaded candidate. Provenance is not Authenticode, Apple signing or notarisation.
+The manually dispatched `Attested package candidates` workflow builds Linux x86-64 GNU, macOS arm64/x86-64, and Windows x86-64 MSVC archives. Each archive includes the binary, checksum-verifying `install.py`, licence, build record and a CycloneDX Cargo source-dependency inventory. That inventory includes build/dev dependencies and is not a precise linked-binary SBOM. The workflow requests GitHub build provenance and an SBOM attestation and uses keyless cosign `sign-blob` for each archive and checksum (bundles end in `.sigstore.json`); verify that the attestation step actually succeeded for the downloaded candidate. Provenance is not Authenticode, Apple signing or notarisation.
 
 Build a candidate locally with `cargo build --locked --release --package bunker --target TARGET`, then `python3 packaging/scripts/package.py --target TARGET --output /tmp/bunker-packages`. The target must be installed in Rust. No signing or network publication occurs.
 
-Download a candidate and its checksum through a trusted channel. Verify its GitHub provenance, when available, using `gh attestation verify ARCHIVE --repo jusso-dev/bunker`. A checksum downloaded with a malicious archive does not establish authenticity. After independent verification, install from the local archive:
+Download a candidate and its checksum through a trusted channel. Verify its GitHub provenance, when available, using `gh attestation verify ARCHIVE --repo jusso-dev/bunker --signer-workflow jusso-dev/bunker/.github/workflows/packages.yml --source-ref refs/tags/vVERSION`; the workflow and tag constraints reject an attested build from another branch or release. A checksum downloaded with a malicious archive does not establish authenticity. After independent verification, install from the local archive:
 
 ```sh
 python3 packaging/scripts/install.py --archive "$ARCHIVE" --sha256 "$EXPECTED_SHA256" --prefix "$HOME/.local"
 ```
 
 PowerShell uses `python packaging/scripts/install.py --archive $Archive --sha256 $ExpectedSha256 --prefix "$env:LOCALAPPDATA\Bunker"`. Add the resulting `bin` directory to `PATH`. The installer verifies SHA-256 before reading the binary member, rejects symlinks/duplicate members, and never extracts arbitrary archive paths. It replaces an existing installed binary; stop running services first. It does not configure services or install a trusted publisher certificate.
+
+For a published release containing `install.py`, macOS/Linux supports this one-line
+bootstrap (replace the version in both places with the reviewed release):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jusso-dev/bunker/v0.1.0/packaging/scripts/bootstrap.py | python3 - --version 0.1.0 --prefix "$HOME/.local"
+```
+
+The initial bootstrap code must itself come from a trusted, reviewed tag. To inspect
+it first, download it to a file before running it. It selects Linux x86-64 GNU or
+macOS arm64/x86-64, downloads the release archive and its `.sha256`, checks the exact
+archive name and digest, runs `gh attestation verify` bound to this repository, the
+`packages.yml` signing workflow and `refs/tags/v<version>` when `gh` is present
+(the packaging workflow refuses to run from any other ref), then delegates to the archive's verified `install.py`. A failed
+attestation stops installation. Without `gh`, it prints an explicit warning and
+checks only SHA-256; use a trusted independent checksum in that case. Python 3 and
+CA trust roots are prerequisites. These commands require a published release;
+adding the workflow does not publish one.
+
+Windows x64 has the equivalent bootstrap (Python 3 and PowerShell required):
+
+```powershell
+./packaging/scripts/install.ps1 -Version 0.1.0 -Prefix "$env:LOCALAPPDATA\Bunker"
+```
+
+Run the reviewed script from this checkout or the matching trusted source tag.
+Both bootstraps accept an explicit release mirror (`--release-base` / `-ReleaseBase`)
+or a local release directory for offline verification. They never extract arbitrary
+archive paths or install services. The local fixture suite covers archive and
+checksum failures, attestation failures, and PowerShell delegation. Native Windows
+installation and hosted keyless signing still require release-run evidence.
 
 `packaging/scripts/package-linux.sh deb|rpm VERSION BINARY OUTPUT_DIRECTORY` invokes separately installed `fpm` and native packaging tooling. The WiX v4 template `packaging/windows/bunker.wxs` can build an unsigned MSI using `wix build -arch x64 -d Version=0.1.0 -d BinaryPath=ABSOLUTE_BINARY_PATH packaging/windows/bunker.wxs`. Homebrew/winget files under `packaging/manifests/` are placeholder templates, not installable manifests. Native package builds and signed distribution remain unverified.
 
@@ -44,6 +75,8 @@ The CLI is a console program, not an SCM service. The `packaging/windows/bunker-
 
 Under that service identity, provision a DPAPI-protected credential using `Read-Host -AsSecureString | Export-Clixml -Path passphrase.dpapi.xml`, then restrict directory ACLs to administrators and the service identity. DPAPI is tied to that Windows account/machine and is not portable escrow. Initialize the repository with the same passphrase using a secure environment-injection process. The wrapper reads the protected value at runtime and removes it from its environment on exit.
 
+Host-mode state is checked more strictly than those directory ACLs. The credential and consumed-request directories, host storage report and OAuth directories, enrollment token file and storage configuration files may only grant access to the service identity, SYSTEM and, for an elevated process, BUILTIN\Administrators as the token default owner; an entry for Administrators, Users or Everyone otherwise causes a fail-closed error. Let Bunker create state directories, which applies a protected owner-only DACL. For token and configuration files, create them inside a directory prepared the same way, for example `icacls DIR /inheritance:r /grant:r "SERVICE_ACCOUNT:(OI)(CI)F" "SYSTEM:(OI)(CI)F"` run before the files are written, with DIR owned by the service identity. See [host integration](../host-integration.md) point 6 for the exact checks.
+
 After reviewing identity, ACLs, executable trust and paths, use WinSW's `install`, `start`, `stop`, and `uninstall` commands. The service defaults to manual start until configured and tested. Windows MSI signing, WinSW deployment and service lifecycle are not verified by this task.
 
 ## GitHub Actions
@@ -51,3 +84,7 @@ After reviewing identity, ACLs, executable trust and paths, use WinSW's `install
 Use the repository action at `./.github/actions/snapshot` after checkout, or pin an audited commit for remote use. It requires an installed CLI, an initialized repository outside the workspace, and `BUNKER_PASSPHRASE` supplied as a job-level environment variable from Actions secrets. Inputs are `repository` (required absolute path), `workspace` (defaults to `GITHUB_WORKSPACE`), and `binary` (defaults to `bunker`). The snapshot runs in the action's post phase, including after earlier step failures.
 
 Use a persistent, protected repository on a trusted self-hosted runner. A repository under a hosted runner's temporary directory disappears when the job ends. This action does not automatically upload an artifact or replicate the post-job snapshot. GitHub post actions run in reverse registration order; account for cleanup ordering. Cancellations, killed runners and infrastructure failures can prevent post execution. Never expose a passphrase or persistent repository to untrusted pull-request code. For hosted runners, explicitly snapshot and replicate before teardown using separately reviewed steps.
+
+## Upgrades and repository compatibility
+
+Repositories are forward-compatible only. A newer Bunker reads every repository an older one wrote, but an older binary refuses to read manifests that use newer fields (for example Git capture, setup scope, or the workspace binding on `session-start`/`session-end` snapshots) instead of guessing. After any newer binary writes to a repository, upgrade every reader of it together: the daemon or service, agent hooks and wrappers, CI runners, and the tooling you would use for disaster recovery. Keep an installer for the current release with your recovery runbook.

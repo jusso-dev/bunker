@@ -251,7 +251,7 @@ impl Repository {
                 let candidate = roots.entry(item.root).or_default();
                 candidate.agents.insert(result.agent);
                 if inside_repository {
-                    let path = request.relative_path.to_string_lossy().into_owned();
+                    let path = portable_path(&request.relative_path);
                     candidate.diagnostics.insert(
                         path.clone(),
                         FileDiagnostic {
@@ -270,7 +270,7 @@ impl Repository {
             for excluded in result.excluded {
                 let candidate = roots.entry(excluded.root).or_default();
                 candidate.agents.insert(result.agent);
-                let path = excluded.relative_path.to_string_lossy().into_owned();
+                let path = portable_path(&excluded.relative_path);
                 candidate
                     .diagnostics
                     .entry(path.clone())
@@ -311,10 +311,12 @@ impl Repository {
                 .context("setup size overflow")?;
             ensure!(
                 source_total <= policy.size_cap_bytes && output_total <= policy.size_cap_bytes,
-                "global setup exceeds size_cap_bytes; no setup manifests published"
+                "global setup is at least {} bytes, over the {}-byte policy size cap (size_cap_bytes; sizeCapBytes on the control plane); no setup manifests published",
+                source_total.max(output_total),
+                policy.size_cap_bytes
             );
             for (path, reason) in prepared.excluded {
-                let path = path.to_string_lossy().into_owned();
+                let path = portable_path(&path);
                 candidate.diagnostics.insert(
                     path.clone(),
                     FileDiagnostic {
@@ -357,10 +359,12 @@ impl Repository {
                 bytes: 0,
                 git: None,
                 setup: Some(scope),
+                workspace: None,
+                created_at_nanos: None,
             };
             for file in files {
                 let bytes = Zeroizing::new(file.bytes);
-                let path = file.relative_path.to_string_lossy().into_owned();
+                let path = portable_path(&file.relative_path);
                 if file.relative_path.to_str().is_none() || safe_path(&path).is_err() {
                     manifest.skipped.push(path.clone());
                     manifest.diagnostics.push(FileDiagnostic {
@@ -396,8 +400,7 @@ impl Repository {
             );
             manifests.push((manifest, plaintext));
         }
-        #[cfg(unix)]
-        self.dir.open_dir("chunks")?.into_std_file().sync_all()?;
+        super::sync_dir(&self.dir, Path::new("chunks"))?;
         for (manifest, plaintext) in &manifests {
             atomic_write(
                 &self.dir,
@@ -452,4 +455,9 @@ impl Repository {
             allow_rebind_overwrite,
         )
     }
+}
+/// Manifest paths use `/` on every platform, matching workspace snapshots.
+fn portable_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }

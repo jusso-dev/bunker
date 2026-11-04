@@ -36,8 +36,29 @@ be regular files owned by the running user, have no hard links, and have owner-o
 permissions. Existing report/OAuth directories must also be owner-only. New state
 directories are created with mode `0700` under an existing safe parent. Files are
 written with mode `0600`, atomically published, fsynced, and read back. Ancestors
-must not be writable by other users except sticky directories. Platforms without
-the implemented Unix permission checks fail closed.
+must not be writable by other users except sticky directories. On Windows the same
+owner, link and reparse-point rules are enforced through ACLs (see
+[host integration](host-integration.md) point 6): new directories receive a protected
+DACL for the running user and SYSTEM instead of mode `0700`, and files inherit it.
+Existing private directories must contain an effective TokenUser allow ACE with
+both object and container inheritance; every allow ACE, including inherit-only
+entries, must name a trusted SID. New protected files are checked by handle before
+any content is written; ordinary repository files do not use this ACL policy.
+On Windows every ancestor is opened directly, from the volume root down, without
+following its final reparse point. Non-root reparse points (including junctions and
+mount points) are rejected. Effective untrusted allow ACEs granting `DELETE`
+(except on the root), `FILE_DELETE_CHILD`, `WRITE_DAC`, `WRITE_OWNER`, `GENERIC_ALL`
+or `GENERIC_WRITE` are rejected. Inherit-only ACEs are ignored for this ancestor
+check; create-file/create-folder grants alone are allowed. Default `C:\Users\<user>` (including `AppData\Local\Temp`), `C:\ProgramData` and the LocalSystem profile pass. Folders created directly under `C:\` (for example `C:\dev`) and folders on default secondary NTFS volumes inherit Modify for Authenticated Users, so any signed-in user could rename and replace them; they are rejected until that inherited grant is removed or narrowed. On Windows this ancestor check also applies to repository, workspace and local replication paths used by host storage, not only to state directories. Object and callback (conditional) ACEs anywhere in the chain are rejected rather than interpreted. The volume root is identified from the path, so do not place state on `subst` drives or mapped network drives, whose real parent chain is not checked. Overlap checks fold case with Unicode lowercase, which can differ from the NTFS uppercase table for rare characters. ACL changes made by trusted principals after a store is opened are not rechecked during a long-running service, and holders of backup/restore privileges bypass ACLs entirely. Ancestor control is trusted only for
+the token user, token default owner, SYSTEM, BUILTIN\Administrators (including
+when the process is not elevated) and the Windows TrustedInstaller service.
+Ancestor owners must also be trusted because ownership normally permits DACL
+changes without an explicit allow ACE. Leaf ownership/access retains the narrower
+token-user/token-default-owner/SYSTEM policy. Overlap checks fold Windows path
+case, including final components that do not yet exist. Handles are not retained
+for all later path operations: re-resolution after validation can still race with
+replacement by principals the ancestor check already trusts. Other platforms fail
+closed.
 
 Both state directories and configuration files must be disjoint from the repository
 and workspace, from each other, and from any local replication destination. The

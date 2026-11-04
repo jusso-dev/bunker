@@ -30,14 +30,180 @@ fn fixture(platform: Platform) -> (TempDir, DiscoveryContext) {
             root.join("roaming")
         }
     };
+    let jetbrains = jetbrains_base(&context);
     let layout: Value =
         serde_json::from_str(include_str!("../../../fixtures/discovery/layout.json")).unwrap();
-    for (section, target) in [("home", home), ("workspace", workspace), ("editor", editor)] {
+    for (section, target) in [
+        ("home", home),
+        ("workspace", workspace),
+        ("editor", editor),
+        ("jetbrains", jetbrains),
+    ] {
         for (relative, text) in layout[section].as_object().unwrap() {
             write(&target, relative, text.as_str().unwrap());
         }
     }
     (temp, context)
+}
+
+/// JetBrains Copilot plugin configuration base, per platform convention.
+fn jetbrains_base(context: &DiscoveryContext) -> PathBuf {
+    match context.platform {
+        Platform::Linux => context.config_dir.clone().unwrap(),
+        Platform::MacOs => context.home.join(".config"),
+        Platform::Windows => context.home.join("AppData/Local"),
+    }
+}
+
+#[test]
+fn every_agent_reports_every_supported_category_on_each_platform() {
+    use ItemCategory::*;
+    let expected = [
+        (
+            AgentId::ClaudeCode,
+            vec![McpConfig, Settings, Skill, Rule, SubAgent, Hook, Memory],
+        ),
+        (
+            AgentId::Cursor,
+            vec![McpConfig, Settings, Skill, Rule, SubAgent, Hook],
+        ),
+        (
+            AgentId::Codex,
+            vec![Settings, Skill, Rule, SubAgent, Hook, Memory],
+        ),
+        (
+            AgentId::GitHubCopilot,
+            vec![McpConfig, Settings, Skill, Rule, SubAgent, Hook],
+        ),
+        (
+            AgentId::Kiro,
+            vec![McpConfig, Settings, Skill, Rule, SubAgent, Hook],
+        ),
+    ];
+    for platform in [Platform::Linux, Platform::MacOs, Platform::Windows] {
+        let (_temp, context) = fixture(platform);
+        let results = discover(&context, &SafetyPolicy::default()).unwrap();
+        for (agent, categories) in &expected {
+            let result = results.iter().find(|r| r.agent == *agent).unwrap();
+            let groups = result.by_category();
+            for category in categories {
+                assert!(
+                    groups.get(category).is_some_and(|items| !items.is_empty()),
+                    "{platform:?} {agent:?} missing {category:?}"
+                );
+            }
+            assert!(groups
+                .values()
+                .flatten()
+                .all(|item| item.agent == *agent && categories.contains(&item.category)));
+        }
+        let has = |agent: AgentId, root: &Path, path: &str, category: ItemCategory| {
+            results
+                .iter()
+                .find(|r| r.agent == agent)
+                .unwrap()
+                .items
+                .iter()
+                .any(|i| {
+                    i.root == root && i.relative_path == Path::new(path) && i.category == category
+                })
+        };
+        let workspace = &context.workspace_roots[0];
+        assert!(has(
+            AgentId::Cursor,
+            workspace,
+            ".cursor/environment.json",
+            Settings
+        ));
+        let jetbrains = jetbrains_base(&context);
+        assert!(has(
+            AgentId::GitHubCopilot,
+            &jetbrains,
+            "github-copilot/intellij/mcp.json",
+            McpConfig
+        ));
+        assert!(has(
+            AgentId::GitHubCopilot,
+            &jetbrains,
+            "github-copilot/intellij/global-copilot-instructions.md",
+            Rule
+        ));
+        // OAuth stores next to the plugin configuration are never candidates.
+        let policy = ExclusionPolicy::new(&SafetyPolicy::default()).unwrap();
+        for store in ["github-copilot/apps.json", "github-copilot/hosts.json"] {
+            assert_eq!(
+                policy.reason(Path::new(store)).unwrap(),
+                Some(ExclusionReason::Credentials)
+            );
+        }
+        assert!(!results
+            .iter()
+            .flat_map(|r| &r.items)
+            .any(|i| i.relative_path.ends_with("apps.json")));
+        let editor = match platform {
+            Platform::Linux => context.config_dir.clone().unwrap(),
+            Platform::MacOs => context.home.join("Library/Application Support"),
+            Platform::Windows => context.app_data.clone().unwrap(),
+        };
+        assert!(has(
+            AgentId::GitHubCopilot,
+            &editor,
+            "Code/User/prompts/plan.prompt.md",
+            Skill
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_managed_settings_are_reported_without_failing_discovery() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, context) = fixture(Platform::Linux);
+    let editor = context.config_dir.clone().unwrap();
+    let managed = editor.join("Code/User/settings.json");
+    write(
+        &editor,
+        "Code/User/settings.json",
+        "{\"github.copilot.enable\":{\"*\":false}}",
+    );
+    let locked = context.home.join(".copilot/agents");
+    let restore = |mode| {
+        fs::set_permissions(&managed, fs::Permissions::from_mode(mode)).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(mode | 0o100)).unwrap();
+    };
+    restore(0o000);
+    if fs::File::open(&managed).is_ok() {
+        // Privileged runners ignore permission bits; nothing to assert.
+        restore(0o600);
+        return;
+    }
+    let results = discover(&context, &SafetyPolicy::default());
+    restore(0o600);
+    let results = results.unwrap();
+    assert_eq!(results.len(), 5);
+    let copilot = results
+        .iter()
+        .find(|r| r.agent == AgentId::GitHubCopilot)
+        .unwrap();
+    for (root, path) in [
+        (&editor, "Code/User/settings.json"),
+        (&context.home, ".copilot/agents"),
+    ] {
+        assert!(
+            copilot.excluded.iter().any(|e| &e.root == root
+                && e.relative_path == Path::new(path)
+                && e.reason == ExclusionReason::Unreadable),
+            "{path} not reported unreadable"
+        );
+        assert!(!copilot
+            .items
+            .iter()
+            .any(|i| i.relative_path.starts_with(path)));
+    }
+    assert!(copilot
+        .items
+        .iter()
+        .any(|i| i.relative_path == Path::new(".copilot/mcp-config.json")));
 }
 
 #[test]
@@ -93,6 +259,9 @@ fn five_agents_on_three_platform_layouts_and_safe_preparation() {
                 "fake-copilot-credential",
                 "fake-kiro-credential",
                 "fake-editor-credential",
+                "fake-cursor-background-credential",
+                "fake-jetbrains-credential",
+                "fake-jetbrains-oauth",
                 "customer-fixture-data",
             ] {
                 assert!(!serialized.contains(marker));
@@ -156,6 +325,63 @@ fn json_sanitizes_nested_secrets_env_headers_args_urls_and_preserves_refs() {
         .secret_references
         .iter()
         .any(|r| r.location.ends_with("/nested/password")));
+}
+
+#[test]
+fn cursor_environment_commands_never_keep_inline_credentials() {
+    let input = br#"{
+        "install":"npm ci && npm login --password fake-flag-value",
+        "start":"API_TOKEN=fake-assignment-value npm start",
+        "build":{"context":".","dockerfile":"Dockerfile"},
+        "update":"tool sync --api-key=fake-equals-value --verbose",
+        "terminals":[{"name":"db","command":"psql postgres://fixture:fake-url-password@db.test/app"}],
+        "snapshot":"plain-snapshot-id"
+    }"#;
+    let result = sanitize(
+        input,
+        FileFormat::for_path(Path::new(".cursor/environment.json")),
+    )
+    .unwrap();
+    let text = String::from_utf8(result.bytes).unwrap();
+    for removed in [
+        "fake-flag-value",
+        "fake-assignment-value",
+        "fake-equals-value",
+        "fake-url-password",
+    ] {
+        assert!(!text.contains(removed), "{removed} leaked");
+    }
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["snapshot"], "plain-snapshot-id");
+    assert_eq!(parsed["build"]["dockerfile"], "Dockerfile");
+    assert!(result.modified);
+    // Flags without values and unrelated flags stay intact.
+    let plain = sanitize(
+        br#"{"start":"npm start --verbose --port 3000"}"#,
+        FileFormat::Json,
+    )
+    .unwrap();
+    assert!(!plain.modified);
+    // `=VALUE` binds even a value starting with `-`.
+    let dashed = sanitize(
+        br#"{"start":"tool --password=-fixture-dashed"}"#,
+        FileFormat::Json,
+    )
+    .unwrap();
+    assert!(dashed.modified);
+    assert!(!String::from_utf8(dashed.bytes)
+        .unwrap()
+        .contains("fixture-dashed"));
+    // Flags naming where a secret lives are references, not inline credentials.
+    for command in [
+        "tool --password-file /run/db-pass",
+        "tool --api-key-env SERVICE_KEY",
+        "tool --token_path=/run/token",
+    ] {
+        let input = serde_json::to_vec(&serde_json::json!({ "start": command })).unwrap();
+        let kept = sanitize(&input, FileFormat::Json).unwrap();
+        assert!(!kept.modified, "{command} was redacted");
+    }
 }
 
 #[test]

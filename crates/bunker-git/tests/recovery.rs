@@ -1,3 +1,5 @@
+// Git-aware capture and restore are Unix-only in v1 (docs/git-recovery.md).
+#![cfg(unix)]
 use bunker_git::{CapturePolicy, GitBackup};
 use std::{
     fs,
@@ -31,6 +33,11 @@ fn git(path: &Path, args: &[&str]) -> String {
             "core.hooksPath=/dev/null",
             "-c",
             "core.fsmonitor=false",
+            // Detached auto-maintenance can write into .git while a capture reads it.
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
             "-c",
             "protocol.file.allow=always",
         ])
@@ -1061,6 +1068,7 @@ fn packed_unicode_ref_aliases_and_ancestor_aliases_refuse_before_mutation() {
     }
 }
 
+#[cfg(unix)] // Unix permission modes and a shell wrapper for Git.
 #[test]
 fn failed_ref_guards_restore_isolated_config_but_preserve_later_config_edits() {
     use std::os::unix::fs::PermissionsExt;
@@ -1152,6 +1160,7 @@ fn failed_ref_guards_restore_isolated_config_but_preserve_later_config_edits() {
     }
 }
 
+#[cfg(unix)] // Unix permission modes and a shell wrapper for Git.
 #[test]
 fn failed_rollback_plumbing_cleans_config_and_rechecks_for_intervening_edits() {
     use std::os::unix::fs::PermissionsExt;

@@ -42,6 +42,9 @@ pub use maintenance::{MaintenancePlan, MaintenanceReport};
 #[path = "repository_setup.rs"]
 mod setup;
 pub use setup::{SetupScope, SetupSnapshot};
+#[path = "repository_session.rs"]
+mod session;
+pub use session::{SessionRollback, SESSION_END, SESSION_ROLLBACK, SESSION_START};
 
 #[path = "repository_git.rs"]
 mod git;
@@ -79,6 +82,13 @@ pub struct Manifest {
     pub git: Option<GitArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<SetupScope>,
+    /// Keyed hash of the canonical captured workspace path; absent on legacy and setup
+    /// manifests. Binds session rollback to one workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Capture time in nanoseconds, ordering captures within one second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_nanos: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiagnostic {
@@ -132,6 +142,9 @@ pub(crate) fn valid_id(id: &str) -> Result<()> {
         "invalid object identifier"
     );
     Ok(())
+}
+fn size_cap_refusal(what: &str, size: u64, cap: u64) -> String {
+    format!("{what} {size} bytes, over the {cap}-byte policy size cap (size_cap_bytes; sizeCapBytes on the control plane); no snapshot published")
 }
 pub fn safe_path(path: &str) -> Result<()> {
     bunker_discovery::validate_relative_path(Path::new(path))?;
@@ -216,6 +229,8 @@ fn atomic_write_inner(
         let mut file = dir.open_with(&temp, &options)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        // Windows cannot rename or unlink this file while its handle is open.
+        drop(file);
         if replace {
             dir.rename(&temp, dir, path)?;
         } else {
@@ -381,6 +396,18 @@ impl Repository {
         manifests.sort_by_key(|m| (m.created_at, m.id.clone()));
         Ok(manifests)
     }
+    /// Keyed identity of a canonical workspace path; never reveals the path itself.
+    pub fn workspace_identity(&self, canonical: &Path) -> Result<String> {
+        Ok(blake3::keyed_hash(
+            &self.key,
+            &serde_json::to_vec(&(
+                "bunker-workspace-identity-v1",
+                canonical.as_os_str().as_encoded_bytes(),
+            ))?,
+        )
+        .to_hex()
+        .to_string())
+    }
     pub fn snapshot(
         &self,
         workspace: &Path,
@@ -415,10 +442,13 @@ impl Repository {
             default_includes: policy.default_includes.clone(),
             ..Default::default()
         })?;
+        let captured_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
         let mut manifest = Manifest {
             version: FORMAT_VERSION,
             id: hex::encode(crypto::random::<32>()),
-            created_at: now(),
+            created_at: captured_at.as_secs(),
             agent,
             session,
             trigger: trigger.into(),
@@ -429,7 +459,16 @@ impl Repository {
             bytes: 0,
             git: None,
             setup: None,
+            workspace: None,
+            created_at_nanos: None,
         };
+        // Only session rollback reads these fields. Older readers reject unknown
+        // manifest fields, so other snapshots keep the earlier manifest shape.
+        if manifest.trigger == SESSION_START || manifest.trigger == SESSION_END {
+            manifest.workspace = Some(self.workspace_identity(&workspace)?);
+            manifest.created_at_nanos =
+                Some(u64::try_from(captured_at.as_nanos()).unwrap_or(u64::MAX));
+        }
         // Hold cooperative exclusion through both Git and workspace capture.
         let _git_access = match git::ExclusiveAccess::optional(&workspace) {
             Ok(access) => {
@@ -587,16 +626,20 @@ impl Repository {
                 continue;
             }
             total = total.checked_add(size).context("workspace size overflow")?;
-            ensure!(
-                total <= policy.size_cap_bytes,
-                "workspace exceeds size_cap_bytes; no snapshot published"
-            );
+            // Keep measuring so the refusal reports the actual workspace size.
+            if total > policy.size_cap_bytes {
+                continue;
+            }
             ensure!(
                 candidates.len() < 100000,
                 "snapshot exceeds 100000 files; narrow workspace or policy"
             );
             candidates.push(relative);
         }
+        ensure!(
+            total <= policy.size_cap_bytes,
+            size_cap_refusal("workspace is", total, policy.size_cap_bytes)
+        );
         for relative in candidates {
             let mut captured = None;
             for attempt in 1..=3 {
@@ -651,7 +694,11 @@ impl Repository {
                 .context("size overflow")?;
             ensure!(
                 manifest.bytes <= policy.size_cap_bytes,
-                "workspace exceeds size_cap_bytes; no snapshot published"
+                size_cap_refusal(
+                    "sanitized workspace content is at least",
+                    manifest.bytes,
+                    policy.size_cap_bytes
+                )
             );
             let mut chunks = vec![];
             for chunk in fastcdc::v2020::FastCDC::new(&bytes, 64 * 1024, 256 * 1024, 1024 * 1024) {
@@ -683,8 +730,7 @@ impl Repository {
         }
         // Each new chunk has synced file data; publish the directory once before
         // any manifest can reference those chunks.
-        #[cfg(unix)]
-        self.dir.open_dir("chunks")?.into_std_file().sync_all()?;
+        sync_dir(&self.dir, Path::new("chunks"))?;
         let plaintext = Zeroizing::new(serde_json::to_vec(&manifest)?);
         ensure!(
             plaintext.len() as u64 + 40 <= MAX_MANIFEST,
@@ -697,6 +743,46 @@ impl Repository {
             false,
         )?;
         Ok(manifest)
+    }
+    /// Safety snapshot of the destination before a restore overwrites existing files or Git
+    /// state, so the restore itself can be undone. `None` when nothing existing changes.
+    pub fn pre_restore_snapshot(
+        &self,
+        plan: &RestorePlan,
+        policy: &Policy,
+    ) -> Result<Option<Manifest>> {
+        let git_changes = plan.git.as_ref().is_some_and(|git| {
+            git.prior_index_fingerprint.as_ref() != Some(&git.desired_index_fingerprint)
+                || git.desired_refs.iter().any(|(name, oid)| {
+                    git.prior_refs.get(name).and_then(Option::as_ref) != Some(oid)
+                })
+                || !git.stash_oldest_first.is_empty()
+        });
+        if !git_changes && !plan.changes.iter().any(|c| c.action == "overwrite") {
+            return Ok(None);
+        }
+        let manifest = self.snapshot(
+            Path::new(&plan.destination),
+            policy,
+            None,
+            None,
+            "pre-restore",
+        )?;
+        ensure!(
+            !git_changes || manifest.git.is_some(),
+            "pre-restore snapshot could not capture current Git state; restore not started"
+        );
+        ensure!(
+            plan.changes.iter().filter(|c| c.action == "overwrite").all(|change| {
+                manifest.files.iter().any(|file| file.path == change.path)
+            }),
+            "pre-restore snapshot omitted a file to overwrite; check snapshot policy and diagnostics; restore not started"
+        );
+        self.audit(
+            "pre_restore_snapshot",
+            serde_json::json!({"snapshot":manifest.id,"restoring":plan.snapshot}),
+        )?;
+        Ok(Some(manifest))
     }
     pub fn file_bytes(&self, file: &FileEntry) -> Result<Zeroizing<Vec<u8>>> {
         let mut bytes = Zeroizing::new(Vec::new());
@@ -752,6 +838,12 @@ impl Repository {
         ensure!(
             !destination.starts_with(&self.root) && !self.root.starts_with(&destination),
             "cannot restore into or around the repository"
+        );
+        ensure!(
+            manifest.trigger != SESSION_ROLLBACK
+                || manifest.workspace.is_some()
+                    && manifest.workspace == Some(self.workspace_identity(&destination)?),
+            "session rollback belongs to another workspace; restore it only into the workspace its session captured"
         );
         let dir = Dir::open_ambient_dir(&destination, ambient_authority())?;
         let mut changes = vec![];
@@ -1122,6 +1214,20 @@ impl Repository {
             false,
         )
     }
+    #[cfg(test)]
+    pub(crate) fn audit_details(&self, event: &str) -> Result<Vec<serde_json::Value>> {
+        let mut details = vec![];
+        for entry in self.dir.read_dir("audit")? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let bytes = read_bounded(&self.dir, &format!("audit/{name}"), MAX_MANIFEST)?;
+            let value: serde_json::Value =
+                serde_json::from_slice(&crypto::open(&self.key, &bytes, name.as_bytes())?)?;
+            if value["event"] == event {
+                details.push(value["detail"].clone());
+            }
+        }
+        Ok(details)
+    }
     pub fn save_request(&self, value: &serde_json::Value) -> Result<String> {
         ensure!(
             self.dir.read_dir("requests")?.take(1024).count() < 1024,
@@ -1311,11 +1417,51 @@ fn sync_parents(dir: &Dir, parent: &Path) -> Result<()> {
         } else {
             &current
         };
-        dir.open_dir(target)?.into_std_file().sync_all()?;
+        sync_dir(dir, target)?;
         if !current.pop() {
             break;
         }
     }
+    Ok(())
+}
+/// Persist directory entries. `Dir::open_dir` uses `O_PATH` on Linux, which
+/// cannot be fsynced (EBADF), so reopen readable. `O_DIRECTORY | O_NONBLOCK`
+/// refuse (without blocking on) a FIFO or other non-directory planted at the
+/// path. Windows has no directory fsync; NTFS journals the metadata and
+/// directory handles reject flushes.
+pub(crate) fn sync_dir(dir: &Dir, path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use cap_fs_ext::OpenOptionsMaybeDirExt;
+        use cap_std::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .maybe_dir(true)
+            .follow(FollowSymlinks::No)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK);
+        let file = dir.open_with(path, &options)?;
+        ensure!(file.metadata()?.is_dir(), "expected a directory");
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = (dir, path);
+    Ok(())
+}
+/// Like [`sync_dir`] for a directory addressed by an ambient path.
+pub fn sync_ambient_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
+            .open(path)?;
+        ensure!(file.metadata()?.is_dir(), "expected a directory");
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1378,6 +1524,30 @@ fn destination_state(dir: &Dir, path: &str) -> Result<Option<(String, u64, bool)
 #[cfg(test)]
 mod review_tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_refuses_a_planted_fifo_without_blocking() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let fifo =
+            std::ffi::CString::new(root.join("fifo").as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = root.clone();
+        std::thread::spawn(move || {
+            let dir = Dir::open_ambient_dir(&path, ambient_authority()).unwrap();
+            let _ = sender.send((
+                sync_dir(&dir, Path::new("fifo")).is_err(),
+                sync_ambient_dir(&path.join("fifo")).is_err(),
+                sync_dir(&dir, Path::new(".")).is_ok() && sync_ambient_dir(&path).is_ok(),
+            ));
+        });
+        let (relative, ambient, directory) = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("directory sync blocked opening a FIFO");
+        assert!(relative && ambient, "FIFO accepted as a directory");
+        assert!(directory, "real directory no longer syncs");
+    }
     #[test]
     fn legacy_manifest_without_reference_metadata_still_requires_rebind_opt_in() {
         let root = tempfile::tempdir().unwrap();
