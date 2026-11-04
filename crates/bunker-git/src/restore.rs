@@ -768,6 +768,8 @@ fn sync_dir(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    // Git-aware restore, the only caller, refuses on non-Unix in v1.
+    #[cfg(unix)]
     #[test]
     fn install_file_persists_and_removes_without_flushing_a_directory_handle() {
         let temp = tempfile::tempdir().unwrap();
