@@ -24,7 +24,7 @@
     "@radix-ui/react-slot": "^1.2.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "jose": "6.2.14",
+    "jose": "6.2.16",
     "next": "^16.1.6",
     "oauth4webapi": "3.8.8",
     "openapi-fetch": "^0.17.0",
