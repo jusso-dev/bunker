@@ -174,9 +174,9 @@ export async function expiredHostCertificate(f: ReturnType<typeof fixtures>) {
     KeyUsageFlags,
     ExtendedKeyUsageExtension,
   } = await import("@peculiar/x509");
-  const { createPrivateKey, webcrypto } = await import("node:crypto");
+  const { createPrivateKey } = await import("node:crypto");
   const key = createPrivateKey(f.read("ca.key"));
-  const signingKey = await webcrypto.subtle.importKey(
+  const signingKey = await globalThis.crypto.subtle.importKey(
     "pkcs8",
     key.export({ type: "pkcs8", format: "der" }),
     { name: "ECDSA", namedCurve: "P-256" },

@@ -4,7 +4,6 @@ import {
   createPublicKey,
   randomBytes,
   X509Certificate as NodeCertificate,
-  webcrypto,
 } from "node:crypto";
 import {
   X509Certificate,
@@ -65,7 +64,7 @@ export async function issueCertificate(
       "Invalid CSR: signed P-256 or RSA 2048–4096 key required",
     );
   }
-  const signingKey = await webcrypto.subtle.importKey(
+  const signingKey = await globalThis.crypto.subtle.importKey(
     "pkcs8",
     key.export({ type: "pkcs8", format: "der" }),
     { name: "ECDSA", namedCurve: "P-256" },

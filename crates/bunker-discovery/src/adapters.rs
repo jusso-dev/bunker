@@ -748,7 +748,7 @@ fn collect_directory(
         if let Some(reason) = exclusions.reason(&path)? {
             if !(kind.is_dir()
                 && exclusions.has_default_includes()
-                && crate::is_default_artifact(&reason))
+                && exclusions.is_overridable_artifact(&path, &reason))
             {
                 excluded.1.push(DiscoveryExclusion {
                     root: excluded.0.to_owned(),

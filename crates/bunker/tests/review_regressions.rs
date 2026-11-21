@@ -824,3 +824,26 @@ fn r2_corrupt_schedule_audit_outage_retries_without_preventing_startup() {
     assert!(state.pending_schedule_recovery.is_none());
     assert_eq!(fs::read_dir(path.join("snapshots")).unwrap().count(), 1);
 }
+
+#[test]
+fn vcs_directories_remain_pruned_when_default_includes_are_configured() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, work) = setup(temp.path());
+    fs::create_dir_all(work.join(".git/objects/ab")).unwrap();
+    fs::write(work.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(work.join(".git/objects/ab/cdef"), "packed object").unwrap();
+    fs::create_dir_all(work.join("dist")).unwrap();
+    fs::write(work.join("dist/bundle.txt"), "included artifact").unwrap();
+
+    let mut policy = Policy::default();
+    policy.default_includes.push("dist/**".into());
+    let manifest = repo.snapshot(&work, &policy, None, None, "test").unwrap();
+
+    assert!(manifest.files.iter().any(|f| f.path == "dist/bundle.txt"));
+    assert!(manifest.skipped.iter().any(|p| p == ".git"));
+    assert!(
+        !manifest.skipped.iter().any(|p| p.starts_with(".git/")),
+        "walker descended into hard-excluded .git directory: {:?}",
+        manifest.skipped
+    );
+}

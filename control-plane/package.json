@@ -24,8 +24,8 @@
     "@radix-ui/react-slot": "^1.2.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "jose": "6.2.14",
-    "next": "^16.1.6",
+    "jose": "6.2.16",
+    "next": "^16.4.6",
     "oauth4webapi": "3.8.8",
     "openapi-fetch": "^0.17.0",
     "pg": "^8.18.0",
@@ -35,16 +35,16 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/node": "^22.19.0",
+    "@types/node": "^26.6.6",
     "@types/pg": "^8.16.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "eslint": "^9.39.0",
-    "eslint-config-next": "^16.1.6",
+    "eslint": "^10.14.0",
+    "eslint-config-next": "^16.4.6",
     "openapi-typescript": "^7.13.0",
     "prettier": "^3.9.10",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "type": "module"
 }

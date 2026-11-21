@@ -3,7 +3,7 @@ use crate::{
     repository::{durable_write, now, KeySource, Manifest, Repository},
 };
 use anyhow::{Context, Result};
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::io::Write;
@@ -158,7 +158,7 @@ pub fn agent_change(path: &str) -> Option<AgentChange> {
 /// Next due time from `from`, with the policy's random jitter.
 pub fn next_due(from: u64, policy: &Policy) -> u64 {
     from.saturating_add(policy.interval_seconds)
-        .saturating_add(rand::thread_rng().gen_range(0..=policy.jitter_seconds))
+        .saturating_add(rand::rng().random_range(0..=policy.jitter_seconds))
 }
 /// Durably note one missed backup per baseline once the policy threshold has passed.
 /// `since` is the last success, or when the schedule was created if it never succeeded.

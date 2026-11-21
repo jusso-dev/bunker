@@ -17,7 +17,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -70,7 +70,9 @@ pub trait KeyProvider: Send + Sync {
 }
 pub fn generate_data_key() -> DataKey {
     let mut key = Zeroizing::new([0; 32]);
-    OsRng.fill_bytes(key.as_mut());
+    SysRng
+        .try_fill_bytes(key.as_mut())
+        .expect("OS random number generator failed");
     DataKey(key)
 }
 pub async fn wrap(provider: &dyn KeyProvider, key: &[u8; 32]) -> Result<WrappedKey> {
@@ -541,11 +543,13 @@ pub fn escrow(key: &[u8; 32], recovery_key: &[u8; 32], repository_id: &str) -> R
         "invalid escrow repository identity"
     );
     let mut nonce = [0; 24];
-    OsRng.fill_bytes(&mut nonce);
+    SysRng
+        .try_fill_bytes(&mut nonce)
+        .expect("OS random number generator failed");
     let context = format!("bunker-escrow-v1:{repository_id}");
     let ciphertext = XChaCha20Poly1305::new(recovery_key.into())
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: key,
                 aad: context.as_bytes(),
@@ -573,7 +577,7 @@ pub fn recover_escrow(
     let context = format!("bunker-escrow-v1:{repository_id}");
     let bytes = XChaCha20Poly1305::new(recovery_key.into())
         .decrypt(
-            XNonce::from_slice(&envelope.nonce),
+            &XNonce::from(envelope.nonce),
             Payload {
                 msg: &envelope.ciphertext,
                 aad: context.as_bytes(),

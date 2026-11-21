@@ -491,7 +491,8 @@ pub async fn recover_legacy_with_key_source(
     ensure!(!destination.exists(), "recovery destination must not exist");
     let parent = destination
         .parent()
-        .context("recovery destination needs a parent")?;
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let staging = tempfile::tempdir_in(parent)?;
     let header = remote_read(operator, &format!("{namespace}/repository.json"), 8192)
