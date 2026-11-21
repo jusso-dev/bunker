@@ -187,7 +187,7 @@ impl Fixture {
         files.insert("notes.md".to_owned(), b"emulator fixture\n".to_vec());
         // Large enough for several content-defined chunks.
         let mut large = vec![0u8; 12 * 1024 * 1024];
-        rand::Rng::fill(&mut rand::thread_rng(), large.as_mut_slice());
+        rand::Rng::fill_bytes(&mut rand::rng(), large.as_mut_slice());
         files.insert("large.bin".to_owned(), large);
         for (name, bytes) in &files {
             fs::write(work.join(name), bytes).unwrap();
@@ -245,7 +245,7 @@ fn round_trip(config: &StorageConfig) {
 
         // An object above the chunk size uses a conditional multipart/block upload.
         let mut probe = vec![0u8; 11 * 1024 * 1024];
-        rand::Rng::fill(&mut rand::thread_rng(), probe.as_mut_slice());
+        rand::Rng::fill_bytes(&mut rand::rng(), probe.as_mut_slice());
         store
             .create_verified("multipart-probe", probe.clone())
             .await

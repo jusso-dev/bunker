@@ -89,7 +89,10 @@ test(
       let buffer: Buffer = Buffer.alloc(0),
         startup = true;
       socket.on("data", (data) => {
-        buffer = Buffer.concat([buffer, data]);
+        buffer = Buffer.concat([
+          buffer,
+          typeof data === "string" ? Buffer.from(data) : data,
+        ]);
         for (;;) {
           if (startup) {
             if (buffer.length < 4) return;

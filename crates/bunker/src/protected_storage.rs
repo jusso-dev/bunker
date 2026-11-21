@@ -3,7 +3,7 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::{DateTime, SecondsFormat, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use http::{HeaderMap, HeaderValue, Method};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

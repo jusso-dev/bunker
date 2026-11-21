@@ -546,7 +546,7 @@ impl Repository {
                 // An include may target a descendant of a default-excluded directory.
                 if entry.file_type().is_dir()
                     && !policy.default_includes.is_empty()
-                    && bunker_discovery::is_default_artifact(&reason)
+                    && exclusions.is_overridable_artifact(relative_path, &reason)
                 {
                     continue;
                 }

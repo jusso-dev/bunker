@@ -315,7 +315,7 @@ export function Console() {
   async function openTimelineLink(link: TimelineLink, available: Tenant[]) {
     setError("");
     setNotice("");
-    const generation = sessionGeneration.current;
+    let generation = sessionGeneration.current;
     // Memberships are paginated; follow every page before declaring the tenant
     // inaccessible. The server still authorizes the snapshot read itself.
     let known = available;
@@ -338,7 +338,10 @@ export function Console() {
       setError("The linked snapshot belongs to a tenant you cannot access.");
       return;
     }
-    if (link.tenantId !== tenantId) switchTenant(link.tenantId);
+    if (link.tenantId !== tenantId) {
+      switchTenant(link.tenantId);
+      generation = sessionGeneration.current;
+    }
     setSection("Timeline");
     setSelected(null);
     try {
@@ -1466,7 +1469,10 @@ function PolicyEditor({
     setPolicy((p) => ({ ...p, [key]: value }));
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    void save(policy);
+    void save({
+      ...policy,
+      exclusions: policy.exclusions.map((x) => x.trim()).filter(Boolean),
+    });
   };
   const protectionError =
     storageProtectionError(policy) ?? missedBackupError(policy);

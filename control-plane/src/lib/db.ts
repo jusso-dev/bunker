@@ -23,15 +23,20 @@ export async function transaction<T>(
   fn: (db: PoolClient) => Promise<T>,
 ): Promise<T> {
   const db = await database().connect();
+  let broken = false;
   try {
     await db.query("BEGIN");
     const value = await fn(db);
     await db.query("COMMIT");
     return value;
   } catch (e) {
-    await db.query("ROLLBACK");
+    try {
+      await db.query("ROLLBACK");
+    } catch {
+      broken = true;
+    }
     throw e;
   } finally {
-    db.release();
+    db.release(broken);
   }
 }

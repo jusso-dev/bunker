@@ -247,7 +247,11 @@ impl Repository {
             }
             for item in result.items {
                 let request = item.request();
-                let inside_repository = item.path().starts_with(&self.root);
+                let item_path = item.path();
+                let inside_repository = item_path.canonicalize().map_or_else(
+                    |_| item_path.starts_with(&self.root),
+                    |p| p.starts_with(&self.root),
+                );
                 let candidate = roots.entry(item.root).or_default();
                 candidate.agents.insert(result.agent);
                 if inside_repository {

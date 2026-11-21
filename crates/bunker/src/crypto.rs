@@ -4,12 +4,14 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use zeroize::Zeroizing;
 
 pub fn random<const N: usize>() -> [u8; N] {
     let mut value = [0; N];
-    OsRng.fill_bytes(&mut value);
+    SysRng
+        .try_fill_bytes(&mut value)
+        .expect("OS random number generator failed");
     value
 }
 
@@ -29,7 +31,7 @@ pub fn seal(key: &[u8; 32], plaintext: &[u8], context: &[u8]) -> Result<Vec<u8>>
     let cipher = XChaCha20Poly1305::new(key.into());
     let encrypted = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: plaintext,
                 aad: context,
@@ -42,12 +44,16 @@ pub fn seal(key: &[u8; 32], plaintext: &[u8], context: &[u8]) -> Result<Vec<u8>>
 }
 
 pub fn open(key: &[u8; 32], ciphertext: &[u8], context: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    let nonce = ciphertext.get(..24).context("truncated encrypted object")?;
+    let nonce: [u8; 24] = ciphertext
+        .get(..24)
+        .context("truncated encrypted object")?
+        .try_into()
+        .context("truncated encrypted object")?;
     let payload = ciphertext.get(24..).context("truncated encrypted object")?;
     let cipher = XChaCha20Poly1305::new(key.into());
     let plaintext = cipher
         .decrypt(
-            XNonce::from_slice(nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: payload,
                 aad: context,

@@ -227,6 +227,14 @@ impl ExclusionPolicy {
         }
         Ok(None)
     }
+    pub fn is_overridable_artifact(&self, relative: &Path, reason: &ExclusionReason) -> bool {
+        is_default_artifact(reason)
+            && !relative.components().any(|c| {
+                c.as_os_str().to_str().is_some_and(|s| {
+                    matches!(s.to_ascii_lowercase().as_str(), ".git" | ".hg" | ".svn")
+                })
+            })
+    }
 }
 pub fn is_default_artifact(reason: &ExclusionReason) -> bool {
     matches!(
