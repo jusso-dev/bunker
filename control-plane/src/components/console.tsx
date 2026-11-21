@@ -133,6 +133,7 @@ export function Console() {
     };
   }, []);
   const sessionGeneration = useRef(0);
+  const timelineRequestId = useRef(0);
   const openLinkRef = useRef<
     (link: TimelineLink, available: Tenant[]) => Promise<void>
   >(async () => {});
@@ -315,7 +316,11 @@ export function Console() {
   async function openTimelineLink(link: TimelineLink, available: Tenant[]) {
     setError("");
     setNotice("");
+    const requestId = ++timelineRequestId.current;
     let generation = sessionGeneration.current;
+    const isCurrent = () =>
+      requestId === timelineRequestId.current &&
+      generation === sessionGeneration.current;
     // Memberships are paginated; follow every page before declaring the tenant
     // inaccessible. The server still authorizes the snapshot read itself.
     let known = available;
@@ -326,7 +331,7 @@ export function Console() {
           data: components["schemas"]["meResponse"];
           next: string | null;
         } = await apiPage<components["schemas"]["meResponse"]>("me", cursor);
-        if (generation !== sessionGeneration.current) return;
+        if (!isCurrent()) return;
         known = mergeRows(known, result.data.tenants);
         cursor = result.next;
         if (!cursor || known.some((t) => t.id === link.tenantId)) break;
@@ -348,12 +353,12 @@ export function Console() {
       const rows = await api<Snapshot[]>(
         `tenants/${link.tenantId}/snapshots/${link.snapshotId}`,
       );
-      if (generation !== sessionGeneration.current) return;
+      if (!isCurrent()) return;
       if (!rows[0]) throw new Error("Snapshot no longer available");
       setPinnedSnapshot(rows[0]);
       setFilter(rows[0].id);
     } catch (e) {
-      if (generation === sessionGeneration.current) handleError(e);
+      if (isCurrent()) handleError(e);
     }
   }
   useEffect(() => {
@@ -1471,7 +1476,7 @@ function PolicyEditor({
     event.preventDefault();
     void save({
       ...policy,
-      exclusions: policy.exclusions.map((x) => x.trim()).filter(Boolean),
+      exclusions: policy.exclusions.filter((x) => x.length > 0),
     });
   };
   const protectionError =
