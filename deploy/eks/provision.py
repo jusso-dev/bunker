@@ -23,6 +23,8 @@ ACCOUNT = "959038055523"
 DB = "bunker-eks-postgres"
 IDENTITY = "bunker-eks-identity"
 TAGS = [{"Key": "Application", "Value": "bunker"}]
+# BlakVault backs up resources tagged backup=prod (RDS only; secrets and IAM need no backup).
+BACKUP_TAGS = [{"Key": "backup", "Value": "prod"}]
 session = boto3.Session(region_name=REGION)
 
 
@@ -84,7 +86,7 @@ def prepare():
             AllocatedStorage=20, MaxAllocatedStorage=100, StorageType="gp3", StorageEncrypted=True,
             DBSubnetGroupName="yumait-eks-data", VpcSecurityGroupIds=[sg], PubliclyAccessible=False,
             MultiAZ=False, BackupRetentionPeriod=7, DeletionProtection=True,
-            AutoMinorVersionUpgrade=True, CopyTagsToSnapshot=True, Tags=TAGS,
+            AutoMinorVersionUpgrade=True, CopyTagsToSnapshot=True, Tags=TAGS + BACKUP_TAGS,
         )["DBInstance"]
     acm = client("acm")
     certificates = [c for page in acm.get_paginator("list_certificates").paginate()
