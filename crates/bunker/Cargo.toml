@@ -25,7 +25,7 @@ hmac = "0.13"
 sha2 = "0.11"
 url = "2.5.9"
 httpdate = "1"
-reqsign-core = { version = "=3.3.2", default-features = false }
+reqsign-core = { version = "=3.3.3", default-features = false }
 reqsign-aws-v4 = { version = "=3.3.1", default-features = false }
 reqsign-azure-storage = { version = "=3.3.0", default-features = false }
 libc = "0.2"
