@@ -152,6 +152,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "asyncband"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e53c31fb18f42e765610b2146531390e56966f601d8ffca530d292a34fe4218"
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2065,7 +2071,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33d5a635dfea36a7a0c3bbb2ca34c97af17f98dd69b0cdf31a1d436a346e0a12"
 dependencies = [
  "anyhow",
- "asyncband",
+ "asyncband 0.7.4",
  "base64 0.23.1",
  "bytes",
  "futures",
@@ -2104,7 +2110,7 @@ version = "0.59.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06b44bdf694cccb7d90515b3eac6623975a2813abf4f5c438b4949a329d6a45b"
 dependencies = [
- "asyncband",
+ "asyncband 0.7.4",
  "futures",
  "http 1.5.0",
  "opendal-core",
@@ -2192,7 +2198,7 @@ version = "0.59.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "451769a355989f8e5695f5158a47833162fdb34a3d2c1db06ffad1fb21e85ec4"
 dependencies = [
- "asyncband",
+ "asyncband 0.7.4",
  "bytes",
  "http 1.5.0",
  "log",
@@ -2207,7 +2213,7 @@ version = "0.59.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b229d9fcb8e1ea2a467ac8a14e056658f835e014756844801cb5284b469e15f8"
 dependencies = [
- "asyncband",
+ "asyncband 0.7.4",
  "bytes",
  "http 1.5.0",
  "log",
@@ -2611,7 +2617,7 @@ name = "reqsign-azure-storage"
 version = "3.3.0"
 dependencies = [
  "anyhow",
- "asyncband",
+ "asyncband 0.7.4",
  "base64 0.23.1",
  "bytes",
  "form_urlencoded",
@@ -2626,12 +2632,12 @@ dependencies = [
 
 [[package]]
 name = "reqsign-core"
-version = "3.3.2"
+version = "3.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85fed85c436b6b920e4b36310f699a77771a91e38ae483df48447bd7d162671c"
+checksum = "5041e58962ebf1a1806a06f45735f1932c9dda25ac2814a59a1b4a3f619c7862"
 dependencies = [
  "anyhow",
- "asyncband",
+ "asyncband 0.8.0",
  "base64 0.23.1",
  "bytes",
  "hex",
